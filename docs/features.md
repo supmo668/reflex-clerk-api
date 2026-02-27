@@ -103,6 +103,17 @@ E.g. `clerk.sign_in_button(rx.button("Sign in"))`
 
 - **SignInWithMetamaskButton**: Not yet implemented.
 
+## API Token & Passcode System
+
+Issue and verify API tokens and one-time passcodes linked to Clerk users. Includes FastAPI integration helpers for protecting endpoints.
+
+- **Token Issuance**: Create API tokens with configurable prefix, expiry, and secure split-token storage
+- **Passcode Issuance**: Generate one-time verification codes for email/SMS flows
+- **FastAPI Helpers**: `Depends()`-compatible functions for token and passcode verification
+- **One-Line Registration**: `clerk.register_auth_api(app)` adds verification endpoints to your Reflex app
+
+See the full [API Integration Guide](api_integration.md) for usage details.
+
 ## Demos
 
 To see these features in action, visit the [demo](https://reflex-clerk-api-demo.adventuresoftim.com).

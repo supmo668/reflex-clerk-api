@@ -27,6 +27,7 @@ dynamic = ["version"]
 dependencies = [
     "authlib>=1.5.1,<2.0.0",
     "clerk-backend-api>=2.0.0,<3.0.0",
+    "fastapi>=0.115.0",
     "reflex>=0.8.0",
 ]
 

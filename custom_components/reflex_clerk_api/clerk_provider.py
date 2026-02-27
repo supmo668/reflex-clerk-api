@@ -1,9 +1,12 @@
 import asyncio
+import hashlib
 import logging
 import os
+import secrets
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any, ClassVar, Self, TypeVar, cast
 
 import authlib.jose.errors as jose_errors
@@ -12,10 +15,27 @@ import reflex as rx
 from authlib.jose import JWTClaims, jwt
 from reflex.event import EventCallback, EventType, IndividualEventType
 from reflex.utils.exceptions import ImmutableStateError
+from sqlmodel import select
 
 from reflex_clerk_api.base import ClerkBase
 
 from .models import Appearance
+from .token_config import (
+    ApiTokenResult,
+    ExpiredPasscodeError,
+    ExpiredTokenError,
+    InvalidPasscodeError,
+    InvalidTokenError,
+    PasscodeError,
+    PasscodeResult,
+    PasscodeVerification,
+    RevokedTokenError,
+    TokenConfig,
+    TokenError,
+    TokenSummary,
+    TokenVerification,
+)
+from .token_models import ApiToken, Passcode
 
 
 class ReflexClerkApiError(Exception):
@@ -59,6 +79,8 @@ class ClerkState(rx.State):
         "nbf": {"essential": True},
         # "azp": {"essential": False, "values": ["http://localhost:3000", "https://example.com"]},
     }
+    _token_config: ClassVar[TokenConfig | None] = None
+    """Token issuance configuration. Set via wrap_app() or set_token_config()."""
 
     @classmethod
     def register_dependent_handler(cls, handler: EventCallback) -> None:
@@ -84,6 +106,32 @@ class ClerkState(rx.State):
     def set_claims_options(cls, claims_options: dict[str, Any]) -> None:
         """Set the claims options for the JWT claims validation."""
         cls._claims_options = claims_options
+
+    @classmethod
+    def set_token_config(
+        cls,
+        prefix: str = "token_",
+        token_code_length: int = 32,
+        short_token_length: int = 6,
+        passcode_length: int = 6,
+        passcode_ttl_seconds: int = 600,
+    ) -> None:
+        """Configure the token issuance system.
+
+        Args:
+            prefix: String prefix for generated API tokens (e.g., "myapp_").
+            token_code_length: Bytes of entropy for the long token (default 32 = 256 bits).
+            short_token_length: Bytes for the short token identifier (default 6).
+            passcode_length: Number of digits in passcodes (default 6).
+            passcode_ttl_seconds: Passcode time-to-live in seconds (default 600).
+        """
+        cls._token_config = TokenConfig(
+            prefix=prefix,
+            token_code_length=token_code_length,
+            short_token_length=short_token_length,
+            passcode_length=passcode_length,
+            passcode_ttl_seconds=passcode_ttl_seconds,
+        )
 
     @property
     def client(self) -> clerk_backend_api.Clerk:
@@ -692,6 +740,434 @@ async def update_user_phone_number(
     return new_phone
 
 
+async def issue_token(
+    current_state: rx.State,
+    name: str,
+    expires_in_days: int | None = None,
+) -> ApiTokenResult:
+    """Issue a new API token for the currently logged-in user.
+
+    The returned ``ApiTokenResult.token_string`` contains the full token and is
+    only available at creation time.  It must not be stored by the application.
+
+    Args:
+        current_state: The ``self`` state from the current event handler.
+        name: A user-facing label for this token.
+        expires_in_days: Optional number of days until the token expires.
+            ``None`` means the token never expires.
+
+    Returns:
+        ApiTokenResult with the full token string (shown once).
+
+    Raises:
+        MissingUserError: If no user is logged in.
+        TokenError: If the token system is not configured.
+
+    Examples:
+
+    ```python
+    class State(rx.State):
+        @rx.event
+        async def create_api_key(self) -> EventType:
+            result = await clerk.issue_token(self, name="My API Key", expires_in_days=90)
+            return rx.toast.info(f"Token: {result.token_string}")
+    ```
+    """
+    clerk_state = await _get_state_within_handler(current_state, ClerkState)
+    user_id = clerk_state.user_id
+    if user_id is None:
+        raise MissingUserError("No user_id to issue token for")
+
+    config = ClerkState._token_config
+    if config is None:
+        raise TokenError(
+            "Token issuance not configured. Call wrap_app() with token_prefix."
+        )
+
+    # short_token uses token_hex (no underscores) so the _ separator is unambiguous
+    short_token = secrets.token_hex(config.short_token_length)
+    long_token = secrets.token_urlsafe(config.token_code_length)
+    long_token_hash = hashlib.sha256(long_token.encode()).hexdigest()
+
+    now = datetime.now(timezone.utc)
+    expires_at: datetime | None = None
+    if expires_in_days is not None:
+        expires_at = now + timedelta(days=expires_in_days)
+
+    token_row = ApiToken(
+        user_id=user_id,
+        name=name,
+        prefix=config.prefix,
+        short_token=short_token,
+        long_token_hash=long_token_hash,
+        is_active=True,
+        expires_at=expires_at,
+    )
+
+    with rx.session() as session:
+        session.add(token_row)
+        session.commit()
+        session.refresh(token_row)
+
+    token_string = f"{config.prefix}{short_token}_{long_token}"
+
+    return ApiTokenResult(
+        id=token_row.id,
+        name=token_row.name,
+        prefix=config.prefix,
+        short_token=short_token,
+        token_string=token_string,
+        is_active=True,
+        expires_at=expires_at,
+        created_at=token_row.created_at,
+    )
+
+
+def verify_token(token_string: str) -> TokenVerification:
+    """Verify an API token and return the associated user information.
+
+    This function is synchronous and stateless — it only needs database access
+    and the configured token prefix (ClassVar).  Suitable for use in FastAPI
+    dependencies.
+
+    Args:
+        token_string: The full token string (e.g., ``"myapp_a1b2c3_kF7xYz..."``).
+
+    Returns:
+        TokenVerification with ``user_id``, ``token_id``, and ``name``.
+
+    Raises:
+        InvalidTokenError: Token is malformed or not found.
+        ExpiredTokenError: Token has expired.
+        RevokedTokenError: Token has been revoked.
+        TokenError: Token system not configured.
+
+    Examples:
+
+    ```python
+    verification = clerk.verify_token("myapp_a1b2c3_kF7xYz...")
+    print(verification.user_id)
+    ```
+    """
+    config = ClerkState._token_config
+    if config is None:
+        raise TokenError("Token issuance not configured.")
+
+    if not token_string.startswith(config.prefix):
+        raise InvalidTokenError("Token prefix does not match")
+
+    remainder = token_string[len(config.prefix) :]
+    parts = remainder.split("_", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise InvalidTokenError("Malformed token string")
+
+    short_token, long_token = parts
+
+    with rx.session() as session:
+        token_row = session.exec(
+            select(ApiToken).where(ApiToken.short_token == short_token)
+        ).first()
+
+        if token_row is None:
+            raise InvalidTokenError("Token not found")
+
+        if not token_row.is_active:
+            raise RevokedTokenError("Token has been revoked")
+
+        if token_row.expires_at is not None:
+            now = datetime.now(timezone.utc)
+            expires_at = token_row.expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if now > expires_at:
+                raise ExpiredTokenError("Token has expired")
+
+        expected_hash = hashlib.sha256(long_token.encode()).hexdigest()
+        if not secrets.compare_digest(token_row.long_token_hash, expected_hash):
+            raise InvalidTokenError("Token verification failed")
+
+        # Update last_used_at
+        token_row.last_used_at = datetime.now(timezone.utc)
+        session.add(token_row)
+        session.commit()
+
+        return TokenVerification(
+            user_id=token_row.user_id,
+            token_id=token_row.id,
+            name=token_row.name,
+        )
+
+
+async def revoke_token(
+    current_state: rx.State,
+    token_id: str,
+    reason: str | None = None,
+) -> None:
+    """Revoke an API token by its ID (soft-delete).
+
+    Only tokens belonging to the currently logged-in user can be revoked.
+
+    Args:
+        current_state: The ``self`` state from the current event handler.
+        token_id: The UUID of the token to revoke.
+        reason: Optional reason for revocation.
+
+    Raises:
+        MissingUserError: If no user is logged in.
+        InvalidTokenError: If no matching active token is found for this user.
+
+    Examples:
+
+    ```python
+    class State(rx.State):
+        @rx.event
+        async def revoke_my_key(self, token_id: str) -> EventType:
+            await clerk.revoke_token(self, token_id, reason="compromised")
+            return rx.toast.success("Token revoked")
+    ```
+    """
+    clerk_state = await _get_state_within_handler(current_state, ClerkState)
+    user_id = clerk_state.user_id
+    if user_id is None:
+        raise MissingUserError("No user_id to revoke token for")
+
+    with rx.session() as session:
+        token_row = session.exec(
+            select(ApiToken).where(
+                ApiToken.id == token_id,
+                ApiToken.user_id == user_id,
+                ApiToken.is_active == True,  # noqa: E712
+            )
+        ).first()
+
+        if token_row is None:
+            raise InvalidTokenError(
+                "No active token found with this ID for the current user"
+            )
+
+        token_row.is_active = False
+        token_row.revoked_at = datetime.now(timezone.utc)
+        token_row.revocation_reason = reason
+        session.add(token_row)
+        session.commit()
+
+
+async def list_tokens(current_state: rx.State) -> list[TokenSummary]:
+    """List all active tokens for the currently logged-in user.
+
+    Args:
+        current_state: The ``self`` state from the current event handler.
+
+    Returns:
+        List of TokenSummary objects (no secrets exposed).
+
+    Raises:
+        MissingUserError: If no user is logged in.
+
+    Examples:
+
+    ```python
+    class State(rx.State):
+        @rx.event
+        async def show_my_tokens(self) -> EventType:
+            tokens = await clerk.list_tokens(self)
+            for t in tokens:
+                print(t.display_token, t.name)
+    ```
+    """
+    clerk_state = await _get_state_within_handler(current_state, ClerkState)
+    user_id = clerk_state.user_id
+    if user_id is None:
+        raise MissingUserError("No user_id to list tokens for")
+
+    with rx.session() as session:
+        rows = session.exec(
+            select(ApiToken).where(
+                ApiToken.user_id == user_id,
+                ApiToken.is_active == True,  # noqa: E712
+            )
+        ).all()
+
+        return [
+            TokenSummary(
+                id=row.id,
+                name=row.name,
+                display_token=f"{row.prefix}{row.short_token}",
+                is_active=row.is_active,
+                expires_at=row.expires_at,
+                last_used_at=row.last_used_at,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+
+async def issue_passcode(
+    current_state: rx.State,
+    user_identifier: str,
+    channel: str = "default",
+) -> PasscodeResult:
+    """Issue a short-lived numeric passcode for the currently logged-in user.
+
+    Any existing unused passcodes for the same user and channel are
+    automatically invalidated before the new one is created.
+
+    Args:
+        current_state: The ``self`` state from the current event handler.
+        user_identifier: Email, phone, or other identifier used for verification.
+        channel: Communication channel tag (e.g., ``"email"``, ``"sms"``).
+
+    Returns:
+        PasscodeResult with the plaintext code (send to user once).
+
+    Raises:
+        MissingUserError: If no user is logged in.
+        PasscodeError: If the token system is not configured.
+
+    Examples:
+
+    ```python
+    class State(rx.State):
+        @rx.event
+        async def send_login_code(self) -> EventType:
+            result = await clerk.issue_passcode(
+                self, user_identifier="jane@example.com", channel="email"
+            )
+            # Send result.code via your email service
+            return rx.toast.info(f"Passcode sent (expires {result.expires_at})")
+    ```
+    """
+    clerk_state = await _get_state_within_handler(current_state, ClerkState)
+    user_id = clerk_state.user_id
+    if user_id is None:
+        raise MissingUserError("No user_id to issue passcode for")
+
+    config = ClerkState._token_config
+    if config is None:
+        raise PasscodeError(
+            "Passcode issuance not configured. Call wrap_app() with token_prefix."
+        )
+
+    # Generate N-digit numeric passcode (preserves leading zeros)
+    code = "".join(
+        str(secrets.randbelow(10)) for _ in range(config.passcode_length)
+    )
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=config.passcode_ttl_seconds)
+
+    with rx.session() as session:
+        # Invalidate existing unused passcodes for same user+channel
+        old_passcodes = session.exec(
+            select(Passcode).where(
+                Passcode.user_id == user_id,
+                Passcode.channel == channel,
+                Passcode.is_used == False,  # noqa: E712
+            )
+        ).all()
+        for old in old_passcodes:
+            old.is_used = True
+            session.add(old)
+
+        # Create new passcode
+        passcode_row = Passcode(
+            user_id=user_id,
+            code_hash=code_hash,
+            user_identifier=user_identifier,
+            channel=channel,
+            expires_at=expires_at,
+        )
+        session.add(passcode_row)
+        session.commit()
+        session.refresh(passcode_row)
+
+    return PasscodeResult(
+        id=passcode_row.id,
+        code=code,
+        user_identifier=user_identifier,
+        channel=channel,
+        expires_at=expires_at,
+        created_at=passcode_row.created_at,
+    )
+
+
+def verify_passcode(
+    code: str,
+    user_identifier: str,
+    channel: str = "default",
+) -> PasscodeVerification:
+    """Verify a passcode and mark it as used (single-use).
+
+    This function is synchronous and stateless — it only needs database access
+    and the configured token config (ClassVar).  Suitable for use in FastAPI
+    dependencies.
+
+    Args:
+        code: The passcode digits provided by the user.
+        user_identifier: The email/phone/identifier used when the passcode was issued.
+        channel: The channel the passcode was issued for.
+
+    Returns:
+        PasscodeVerification with ``user_id`` and metadata.
+
+    Raises:
+        InvalidPasscodeError: Passcode not found, already used, or hash mismatch.
+        ExpiredPasscodeError: Passcode has expired.
+        PasscodeError: Passcode system not configured.
+
+    Examples:
+
+    ```python
+    verification = clerk.verify_passcode(
+        code="847291", user_identifier="jane@example.com", channel="email"
+    )
+    print(verification.user_id)
+    ```
+    """
+    config = ClerkState._token_config
+    if config is None:
+        raise PasscodeError("Passcode system not configured.")
+
+    code_hash = hashlib.sha256(code.encode()).hexdigest()
+
+    with rx.session() as session:
+        passcode_row = session.exec(
+            select(Passcode).where(
+                Passcode.user_identifier == user_identifier,
+                Passcode.channel == channel,
+                Passcode.is_used == False,  # noqa: E712
+            )
+        ).first()
+
+        if passcode_row is None:
+            raise InvalidPasscodeError("No valid passcode found")
+
+        # Check expiration
+        now = datetime.now(timezone.utc)
+        expires_at = passcode_row.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if now > expires_at:
+            raise ExpiredPasscodeError("Passcode has expired")
+
+        # Verify hash (constant-time comparison)
+        if not secrets.compare_digest(passcode_row.code_hash, code_hash):
+            raise InvalidPasscodeError("Passcode verification failed")
+
+        # Mark as used (single-use)
+        passcode_row.is_used = True
+        session.add(passcode_row)
+        session.commit()
+
+        return PasscodeVerification(
+            user_id=passcode_row.user_id,
+            passcode_id=passcode_row.id,
+            user_identifier=passcode_row.user_identifier,
+            channel=passcode_row.channel,
+        )
+
+
 def register_on_auth_change_handler(handler: EventCallback) -> None:
     """Register a handler to be called any time the user logs in or out.
 
@@ -707,6 +1183,11 @@ def clerk_provider(
     secret_key: str | None = None,
     register_user_state: bool = False,
     appearance: Appearance | None = None,
+    token_prefix: str | None = None,
+    token_code_length: int = 32,
+    short_token_length: int = 6,
+    passcode_length: int = 6,
+    passcode_ttl_seconds: int = 600,
     **props,
 ) -> rx.Component:
     """
@@ -720,12 +1201,26 @@ def clerk_provider(
         secret_key: Your Clerk app's Secret Key, which you can find in the Clerk Dashboard. It will be prefixed with sk_test_ in development instances and sk_live_ in production instances. Do not expose this on the frontend with a public environment variable.
         register_user_state: Whether to register the ClerkUser state to automatically load user information on login.
         appearance: Optional object to style your components. Will only affect Clerk components.
+        token_prefix: String prefix for generated API tokens (e.g., "myapp_"). If provided, enables the token issuance system.
+        token_code_length: Bytes of entropy for the long token (default 32 = 256 bits).
+        short_token_length: Bytes for the short token identifier (default 6).
+        passcode_length: Number of digits in passcodes (default 6).
+        passcode_ttl_seconds: Passcode time-to-live in seconds (default 600 = 10 minutes).
     """
     if secret_key:
         ClerkState._set_secret_key(secret_key)
 
     if register_user_state:
         register_on_auth_change_handler(ClerkUser.load_user)
+
+    if token_prefix is not None:
+        ClerkState.set_token_config(
+            prefix=token_prefix,
+            token_code_length=token_code_length,
+            short_token_length=short_token_length,
+            passcode_length=passcode_length,
+            passcode_ttl_seconds=passcode_ttl_seconds,
+        )
 
     return ClerkProvider.create(
         ClerkSessionSynchronizer.create(*children),
@@ -741,6 +1236,13 @@ def wrap_app(
     secret_key: str | None = None,
     register_user_state: bool = False,
     appearance: Appearance | None = None,
+    token_prefix: str | None = None,
+    token_code_length: int = 32,
+    short_token_length: int = 6,
+    passcode_length: int = 6,
+    passcode_ttl_seconds: int = 600,
+    register_api: bool = False,
+    api_prefix: str = "/auth",
     **props,
 ) -> rx.App:
     """Wraps the entire app with the ClerkProvider.
@@ -753,6 +1255,15 @@ def wrap_app(
         publishable_key: The Clerk Publishable Key for your instance.
         secret_key: Your Clerk app's Secret Key. (not needed for frontend only)
         register_user_state: Whether to register the ClerkUser state to automatically load user information on login.
+        token_prefix: String prefix for generated API tokens (e.g., "myapp_"). If provided, enables the token issuance system.
+        token_code_length: Bytes of entropy for the long token (default 32 = 256 bits).
+        short_token_length: Bytes for the short token identifier (default 6).
+        passcode_length: Number of digits in passcodes (default 6).
+        passcode_ttl_seconds: Passcode time-to-live in seconds (default 600 = 10 minutes).
+        register_api: Whether to register FastAPI auth endpoints (token/passcode verification)
+            on the app's ``api_transformer``. Requires ``token_prefix`` to be set.
+        api_prefix: URL prefix for auth API routes (default ``"/auth"``).
+            Only used when ``register_api=True``.
     """
     # 1 makes this the first wrapper around the content
     #  (0 would place it after, 100 would also wrap default reflex wrappers)
@@ -761,6 +1272,17 @@ def wrap_app(
         secret_key=secret_key,
         register_user_state=register_user_state,
         appearance=appearance,
+        token_prefix=token_prefix,
+        token_code_length=token_code_length,
+        short_token_length=short_token_length,
+        passcode_length=passcode_length,
+        passcode_ttl_seconds=passcode_ttl_seconds,
         **props,
     )
+
+    if register_api:
+        from .fastapi_helpers import register_auth_api
+
+        register_auth_api(app, prefix=api_prefix)
+
     return app
