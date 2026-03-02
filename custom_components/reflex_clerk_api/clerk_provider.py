@@ -304,6 +304,12 @@ class ClerkUser(rx.State):
     """The Clerk phone_number_id for the primary phone number, used for updates."""
     has_image: bool = False
     image_url: str = ""
+    public_metadata: dict[str, Any] = {}
+    """User's public metadata (readable by frontend via JWT session claims)."""
+    private_metadata: dict[str, Any] = {}
+    """User's private metadata (backend-only, never exposed to frontend)."""
+    unsafe_metadata: dict[str, Any] = {}
+    """User's unsafe metadata (writable from frontend, use with caution)."""
 
     # Set to True when the state is registered on the ClerkState to avoid registering it multiple times.
     _is_registered: ClassVar[bool] = False
@@ -354,6 +360,69 @@ class ClerkUser(rx.State):
             self.phone_number_id = ""
         self.has_image = True if user.has_image is True else False
         self.image_url = user.image_url or ""
+
+        # Load metadata (dict fields; None/UNSET → empty dict)
+        self.public_metadata = (
+            dict(user.public_metadata)
+            if user.public_metadata
+            and user.public_metadata != clerk_backend_api.UNSET
+            else {}
+        )
+        self.private_metadata = (
+            dict(user.private_metadata)
+            if user.private_metadata
+            and user.private_metadata != clerk_backend_api.UNSET
+            else {}
+        )
+        self.unsafe_metadata = (
+            dict(user.unsafe_metadata)
+            if user.unsafe_metadata
+            and user.unsafe_metadata != clerk_backend_api.UNSET
+            else {}
+        )
+
+    @rx.event
+    async def update_metadata(
+        self,
+        public_metadata: dict[str, Any] | None = None,
+        private_metadata: dict[str, Any] | None = None,
+        unsafe_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Update the user's metadata in Clerk.
+
+        Clerk performs a deep merge on metadata updates — keys you provide are
+        merged into existing metadata, and keys set to ``None`` are removed.
+
+        Args:
+            public_metadata: Metadata readable by frontend via JWT session claims.
+            private_metadata: Metadata accessible only from the backend.
+            unsafe_metadata: Metadata writable from the frontend (use with caution).
+        """
+        updated_user = await update_user_metadata(
+            self,
+            public_metadata=public_metadata,
+            private_metadata=private_metadata,
+            unsafe_metadata=unsafe_metadata,
+        )
+        if updated_user:
+            self.public_metadata = (
+                dict(updated_user.public_metadata)
+                if updated_user.public_metadata
+                and updated_user.public_metadata != clerk_backend_api.UNSET
+                else self.public_metadata
+            )
+            self.private_metadata = (
+                dict(updated_user.private_metadata)
+                if updated_user.private_metadata
+                and updated_user.private_metadata != clerk_backend_api.UNSET
+                else self.private_metadata
+            )
+            self.unsafe_metadata = (
+                dict(updated_user.unsafe_metadata)
+                if updated_user.unsafe_metadata
+                and updated_user.unsafe_metadata != clerk_backend_api.UNSET
+                else self.unsafe_metadata
+            )
 
     @rx.event
     async def update_phone_number(
@@ -738,6 +807,73 @@ async def update_user_phone_number(
             logging.debug("Deleted phone number")
 
     return new_phone
+
+
+async def update_user_metadata(
+    current_state: rx.State,
+    public_metadata: dict[str, Any] | None = None,
+    private_metadata: dict[str, Any] | None = None,
+    unsafe_metadata: dict[str, Any] | None = None,
+) -> clerk_backend_api.models.User | None:
+    """Update the current user's metadata in Clerk.
+
+    Clerk performs a **deep merge** on metadata updates — keys you provide are
+    merged into existing metadata, and keys explicitly set to ``None`` are removed.
+    The 8 KB limit applies to each metadata type independently.
+
+    This is a standalone helper that can be called from any event handler. For
+    use from within ``ClerkUser``, prefer the ``ClerkUser.update_metadata()``
+    event handler which also updates local state.
+
+    Args:
+        current_state: The ``self`` state from the current event handler.
+        public_metadata: Metadata readable by frontend via JWT session claims.
+        private_metadata: Metadata accessible only from the backend.
+        unsafe_metadata: Metadata writable from the frontend (use with caution).
+
+    Returns:
+        The updated ``clerk_backend_api.models.User`` object, or ``None``
+        if no metadata was provided.
+
+    Examples:
+
+    ```python
+    class State(rx.State):
+        @rx.event
+        async def mark_user_as_subscribed(self):
+            await clerk.update_user_metadata(
+                self,
+                public_metadata={"stripe": {"status": "active", "plan": "pro"}},
+            )
+            return rx.toast.success("Subscription metadata saved")
+
+        @rx.event
+        async def store_internal_flags(self):
+            await clerk.update_user_metadata(
+                self,
+                private_metadata={"internal_tier": "enterprise"},
+            )
+    ```
+    """
+    if not any([public_metadata, private_metadata, unsafe_metadata]):
+        return None
+
+    clerk_state = await _get_state_within_handler(current_state, ClerkState)
+    user_id = clerk_state.user_id
+    if user_id is None:
+        raise MissingUserError("No user_id to update metadata for")
+
+    kwargs: dict[str, Any] = {"user_id": user_id}
+    if public_metadata is not None:
+        kwargs["public_metadata"] = public_metadata
+    if private_metadata is not None:
+        kwargs["private_metadata"] = private_metadata
+    if unsafe_metadata is not None:
+        kwargs["unsafe_metadata"] = unsafe_metadata
+
+    updated_user = await clerk_state.client.users.update_metadata_async(**kwargs)
+    logging.debug("Updated metadata for user %s", user_id)
+    return updated_user
 
 
 async def issue_token(
