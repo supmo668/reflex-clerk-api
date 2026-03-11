@@ -26,6 +26,12 @@ from .control_components import (
     signed_in,
     signed_out,
 )
+from .organization_components import (
+    create_organization,
+    organization_list,
+    organization_profile,
+    organization_switcher,
+)
 from .fastapi_helpers import (
     PasscodeBody,
     create_token_router,
@@ -60,6 +66,10 @@ from .user_components import user_button, user_profile
 
 __all__ = [
     "ApiToken",
+    "create_organization",
+    "organization_list",
+    "organization_profile",
+    "organization_switcher",
     "ApiTokenResult",
     "ClerkState",
     "ClerkUser",
