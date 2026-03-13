@@ -876,6 +876,55 @@ async def update_user_metadata(
     return updated_user
 
 
+def _create_token_in_db(
+    user_id: str,
+    name: str,
+    config: TokenConfig,
+    expires_in_days: int | None = None,
+) -> ApiTokenResult:
+    """Internal helper that creates a token row and returns the result.
+
+    This is the shared implementation used by both ``issue_token`` (Reflex state
+    context) and ``issue_token_for_user`` (stateless / FastAPI context).
+    """
+    short_token = secrets.token_hex(config.short_token_length)
+    long_token = secrets.token_urlsafe(config.token_code_length)
+    long_token_hash = hashlib.sha256(long_token.encode()).hexdigest()
+
+    now = datetime.now(timezone.utc)
+    expires_at: datetime | None = None
+    if expires_in_days is not None:
+        expires_at = now + timedelta(days=expires_in_days)
+
+    token_row = ApiToken(
+        user_id=user_id,
+        name=name,
+        prefix=config.prefix,
+        short_token=short_token,
+        long_token_hash=long_token_hash,
+        is_active=True,
+        expires_at=expires_at,
+    )
+
+    with rx.session() as session:
+        session.add(token_row)
+        session.commit()
+        session.refresh(token_row)
+
+    token_string = f"{config.prefix}{short_token}_{long_token}"
+
+    return ApiTokenResult(
+        id=token_row.id,
+        name=token_row.name,
+        prefix=config.prefix,
+        short_token=short_token,
+        token_string=token_string,
+        is_active=True,
+        expires_at=expires_at,
+        created_at=token_row.created_at,
+    )
+
+
 async def issue_token(
     current_state: rx.State,
     name: str,
@@ -920,42 +969,57 @@ async def issue_token(
             "Token issuance not configured. Call wrap_app() with token_prefix."
         )
 
-    # short_token uses token_hex (no underscores) so the _ separator is unambiguous
-    short_token = secrets.token_hex(config.short_token_length)
-    long_token = secrets.token_urlsafe(config.token_code_length)
-    long_token_hash = hashlib.sha256(long_token.encode()).hexdigest()
-
-    now = datetime.now(timezone.utc)
-    expires_at: datetime | None = None
-    if expires_in_days is not None:
-        expires_at = now + timedelta(days=expires_in_days)
-
-    token_row = ApiToken(
+    return _create_token_in_db(
         user_id=user_id,
         name=name,
-        prefix=config.prefix,
-        short_token=short_token,
-        long_token_hash=long_token_hash,
-        is_active=True,
-        expires_at=expires_at,
+        config=config,
+        expires_in_days=expires_in_days,
     )
 
-    with rx.session() as session:
-        session.add(token_row)
-        session.commit()
-        session.refresh(token_row)
 
-    token_string = f"{config.prefix}{short_token}_{long_token}"
+def issue_token_for_user(
+    user_id: str,
+    name: str,
+    expires_in_days: int | None = None,
+) -> ApiTokenResult:
+    """Issue a new API token for a known user ID (stateless variant).
 
-    return ApiTokenResult(
-        id=token_row.id,
-        name=token_row.name,
-        prefix=config.prefix,
-        short_token=short_token,
-        token_string=token_string,
-        is_active=True,
-        expires_at=expires_at,
-        created_at=token_row.created_at,
+    Unlike :func:`issue_token`, this function does **not** require a Reflex
+    ``rx.State`` context and can be called from FastAPI route handlers or
+    background tasks.
+
+    Args:
+        user_id: The string user ID to issue the token for.
+        name: A user-facing label for this token.
+        expires_in_days: Optional number of days until the token expires.
+            ``None`` means the token never expires.
+
+    Returns:
+        ApiTokenResult with the full token string (shown once).
+
+    Raises:
+        TokenError: If the token system is not configured.
+
+    Examples:
+
+    ```python
+    from reflex_clerk_api import issue_token_for_user
+
+    result = issue_token_for_user("user_123", name="API Key")
+    print(result.token_string)
+    ```
+    """
+    config = ClerkState._token_config
+    if config is None:
+        raise TokenError(
+            "Token issuance not configured. Call wrap_app() with token_prefix."
+        )
+
+    return _create_token_in_db(
+        user_id=user_id,
+        name=name,
+        config=config,
+        expires_in_days=expires_in_days,
     )
 
 
