@@ -6,9 +6,6 @@ class SignIn(ClerkBase):
 
     path: str
 
-    routing: str | None = None
-    'Clerk routing strategy: "path" (default), "hash", or "virtual".'
-
     fallback_redirect_url: str | None = None
     "The fallback URL to redirect to after the user signs in, if there's no redirect_url in the path already. Defaults to /."
 
@@ -26,9 +23,6 @@ class SignUp(ClerkBase):
     tag = "SignUp"
 
     path: str
-
-    routing: str | None = None
-    'Clerk routing strategy: "path" (default), "hash", or "virtual".'
 
     fallback_redirect_url: str | None = None
     "The fallback URL to redirect to after the user signs up, if there's no redirect_url in the path already. Defaults to /."
