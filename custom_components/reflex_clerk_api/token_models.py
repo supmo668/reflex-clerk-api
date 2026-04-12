@@ -45,6 +45,7 @@ class ApiToken(rx.Model, table=True):
     )
     user_id: str = Field(index=True, nullable=False, sa_type=String(255))
     name: str = Field(nullable=False, sa_type=String(255))
+    origin: str = Field(default="user", nullable=False, sa_type=String(50))
     prefix: str = Field(nullable=False, sa_type=String(50))
     short_token: str = Field(
         unique=True,

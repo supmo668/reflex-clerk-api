@@ -881,6 +881,7 @@ def _create_token_in_db(
     name: str,
     config: TokenConfig,
     expires_in_days: int | None = None,
+    origin: str = "user",
 ) -> ApiTokenResult:
     """Internal helper that creates a token row and returns the result.
 
@@ -899,6 +900,7 @@ def _create_token_in_db(
     token_row = ApiToken(
         user_id=user_id,
         name=name,
+        origin=origin,
         prefix=config.prefix,
         short_token=short_token,
         long_token_hash=long_token_hash,
@@ -929,6 +931,7 @@ async def issue_token(
     current_state: rx.State,
     name: str,
     expires_in_days: int | None = None,
+    origin: str = "user",
 ) -> ApiTokenResult:
     """Issue a new API token for the currently logged-in user.
 
@@ -974,6 +977,7 @@ async def issue_token(
         name=name,
         config=config,
         expires_in_days=expires_in_days,
+        origin=origin,
     )
 
 
@@ -981,6 +985,7 @@ def issue_token_for_user(
     user_id: str,
     name: str,
     expires_in_days: int | None = None,
+    origin: str = "user",
 ) -> ApiTokenResult:
     """Issue a new API token for a known user ID (stateless variant).
 
@@ -1020,6 +1025,7 @@ def issue_token_for_user(
         name=name,
         config=config,
         expires_in_days=expires_in_days,
+        origin=origin,
     )
 
 
