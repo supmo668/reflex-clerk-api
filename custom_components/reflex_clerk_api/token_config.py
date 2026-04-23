@@ -98,15 +98,21 @@ class ApiTokenResult:
     is_active: bool
     expires_at: datetime | None
     created_at: datetime
+    scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class TokenVerification:
-    """Returned when an API token is successfully verified."""
+    """Returned when an API token is successfully verified.
+
+    ``scopes`` lists the permissions granted to this token. Consuming services
+    check these to authorize actions (e.g., ``"health:read"``, ``"kg:write"``).
+    """
 
     user_id: str
     token_id: str
     name: str
+    scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,7 @@ class TokenSummary:
     expires_at: datetime | None
     last_used_at: datetime | None
     created_at: datetime
+    scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

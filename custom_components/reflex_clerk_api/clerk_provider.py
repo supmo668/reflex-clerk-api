@@ -876,12 +876,16 @@ async def update_user_metadata(
     return updated_user
 
 
+_DEFAULT_TOKEN_SCOPES: tuple[str, ...] = ("health:read", "health:write")
+
+
 def _create_token_in_db(
     user_id: str,
     name: str,
     config: TokenConfig,
     expires_in_days: int | None = None,
     origin: str = "user",
+    scopes: list[str] | tuple[str, ...] | None = None,
 ) -> ApiTokenResult:
     """Internal helper that creates a token row and returns the result.
 
@@ -897,6 +901,10 @@ def _create_token_in_db(
     if expires_in_days is not None:
         expires_at = now + timedelta(days=expires_in_days)
 
+    resolved_scopes: list[str] = (
+        list(scopes) if scopes is not None else list(_DEFAULT_TOKEN_SCOPES)
+    )
+
     token_row = ApiToken(
         user_id=user_id,
         name=name,
@@ -906,6 +914,7 @@ def _create_token_in_db(
         long_token_hash=long_token_hash,
         is_active=True,
         expires_at=expires_at,
+        scopes=resolved_scopes,
     )
 
     with rx.session() as session:
@@ -924,6 +933,7 @@ def _create_token_in_db(
         is_active=True,
         expires_at=expires_at,
         created_at=token_row.created_at,
+        scopes=tuple(resolved_scopes),
     )
 
 
@@ -932,6 +942,7 @@ async def issue_token(
     name: str,
     expires_in_days: int | None = None,
     origin: str = "user",
+    scopes: list[str] | tuple[str, ...] | None = None,
 ) -> ApiTokenResult:
     """Issue a new API token for the currently logged-in user.
 
@@ -943,6 +954,8 @@ async def issue_token(
         name: A user-facing label for this token.
         expires_in_days: Optional number of days until the token expires.
             ``None`` means the token never expires.
+        scopes: Permissions granted to this token (e.g., ``["health:read"]``).
+            Defaults to ``["health:read", "health:write"]`` for backward compat.
 
     Returns:
         ApiTokenResult with the full token string (shown once).
@@ -978,6 +991,7 @@ async def issue_token(
         config=config,
         expires_in_days=expires_in_days,
         origin=origin,
+        scopes=scopes,
     )
 
 
@@ -986,6 +1000,7 @@ def issue_token_for_user(
     name: str,
     expires_in_days: int | None = None,
     origin: str = "user",
+    scopes: list[str] | tuple[str, ...] | None = None,
 ) -> ApiTokenResult:
     """Issue a new API token for a known user ID (stateless variant).
 
@@ -998,6 +1013,8 @@ def issue_token_for_user(
         name: A user-facing label for this token.
         expires_in_days: Optional number of days until the token expires.
             ``None`` means the token never expires.
+        scopes: Permissions granted to this token (e.g., ``["health:read"]``).
+            Defaults to ``["health:read", "health:write"]`` for backward compat.
 
     Returns:
         ApiTokenResult with the full token string (shown once).
@@ -1026,6 +1043,7 @@ def issue_token_for_user(
         config=config,
         expires_in_days=expires_in_days,
         origin=origin,
+        scopes=scopes,
     )
 
 
@@ -1101,6 +1119,7 @@ def verify_token(token_string: str) -> TokenVerification:
             user_id=token_row.user_id,
             token_id=token_row.id,
             name=token_row.name,
+            scopes=tuple(token_row.scopes or ()),
         )
 
 
@@ -1203,6 +1222,7 @@ async def list_tokens(current_state: rx.State) -> list[TokenSummary]:
                 expires_at=row.expires_at,
                 last_used_at=row.last_used_at,
                 created_at=row.created_at,
+                scopes=tuple(row.scopes or ()),
             )
             for row in rows
         ]

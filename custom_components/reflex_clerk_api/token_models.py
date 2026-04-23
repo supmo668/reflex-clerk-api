@@ -16,7 +16,7 @@ from typing import Optional
 
 import reflex as rx
 import sqlalchemy
-from sqlalchemy import DateTime, String
+from sqlalchemy import JSON, DateTime, String
 from sqlmodel import Column, Field
 
 
@@ -54,6 +54,18 @@ class ApiToken(rx.Model, table=True):
         sa_type=String(50),
     )
     long_token_hash: str = Field(nullable=False, sa_type=String(64))
+    # Scopes granted to this token. Consuming services (MCP servers, API routes)
+    # check these scopes to authorize actions. Default grants legacy health:*
+    # access so pre-scope-era tokens continue working post-migration.
+    scopes: list[str] = Field(
+        default_factory=lambda: ["health:read", "health:write"],
+        sa_column=Column(
+            "scopes",
+            JSON,
+            server_default='["health:read", "health:write"]',
+            nullable=False,
+        ),
+    )
     is_active: bool = Field(default=True, nullable=False)
     expires_at: Optional[datetime] = Field(
         default=None,
