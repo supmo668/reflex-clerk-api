@@ -4,7 +4,11 @@ from reflex_clerk_api.base import ClerkBase
 class SignIn(ClerkBase):
     tag = "SignIn"
 
-    path: str
+    path: str | None = None
+    "The path the SignIn component is mounted at when using path-based routing. Required when routing='path' (the default when path is set). Omit when routing='hash'."
+
+    routing: str | None = None
+    "Clerk routing strategy: 'path' (default when path is set), 'hash', or 'virtual'. Use 'hash' in frameworks without catch-all sub-routes for /sign-in/factor-one etc."
 
     fallback_redirect_url: str | None = None
     "The fallback URL to redirect to after the user signs in, if there's no redirect_url in the path already. Defaults to /."
@@ -22,7 +26,11 @@ class SignIn(ClerkBase):
 class SignUp(ClerkBase):
     tag = "SignUp"
 
-    path: str
+    path: str | None = None
+    "The path the SignUp component is mounted at when using path-based routing. Required when routing='path' (the default when path is set). Omit when routing='hash'."
+
+    routing: str | None = None
+    "Clerk routing strategy: 'path' (default when path is set), 'hash', or 'virtual'. Use 'hash' in frameworks without catch-all sub-routes for /sign-up/verify etc."
 
     fallback_redirect_url: str | None = None
     "The fallback URL to redirect to after the user signs up, if there's no redirect_url in the path already. Defaults to /."
