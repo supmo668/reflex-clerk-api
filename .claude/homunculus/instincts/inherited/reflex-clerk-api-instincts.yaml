@@ -1,0 +1,300 @@
+# Instincts generated from https://github.com/supmo668/reflex-clerk-api
+# Generated: 2026-05-07T22:06:10.993Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: reflex-clerk-api-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: fix
+
+## Evidence
+
+- 1 commits analyzed
+- Detected conventional commit pattern
+- Examples: fix(token-models): remove legacy ApiToken (Syntropy-Journals issue #397)
+
+---
+id: reflex-clerk-api-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Commit Length
+
+## Action
+
+Write moderate-length commit messages (~72 characters)
+
+## Evidence
+
+- Average commit message length: 72 chars
+- Based on 1 commits
+
+---
+id: reflex-clerk-api-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: reflex-clerk-api-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: reflex-clerk-api-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: reflex-clerk-api-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: reflex-clerk-api-instinct-file-naming
+trigger: "When creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct File Naming
+
+## Action
+
+Name the file using snake_case
+
+## Evidence
+
+- Pattern in namingConventions.files
+
+---
+id: reflex-clerk-api-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.functions
+
+---
+id: reflex-clerk-api-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase
+
+## Evidence
+
+- Pattern in namingConventions.classes
+
+---
+id: reflex-clerk-api-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in namingConventions.constants
+
+---
+id: reflex-clerk-api-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in importStyle
+
+---
+id: reflex-clerk-api-instinct-export-style
+trigger: "When exporting symbols"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle
+
+---
+id: reflex-clerk-api-instinct-commit-format
+trigger: "When making a git commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Commit Format
+
+## Action
+
+Use the conventional commit format with a 'fix' prefix and a scope in parentheses, followed by a concise message
+
+## Evidence
+
+- Seen in commit: fix(token-models): remove legacy ApiToken (Syntropy-Journals issue #397)
+- Pattern in commits.prefixes
+
+---
+id: reflex-clerk-api-instinct-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Commit Length
+
+## Action
+
+Keep the commit message around 72 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength
+
+---
+id: reflex-clerk-api-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: supmo668/reflex-clerk-api
+---
+
+# Reflex Clerk Api Instinct Test Location
+
+## Action
+
+Place test files in the 'tests' folder, separate from source code
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation
+- Pattern in architecture.folderStructure.commonFolders
+
