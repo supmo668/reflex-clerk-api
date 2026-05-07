@@ -1,12 +1,15 @@
 """Tests for FastAPI integration helpers.
 
-These tests verify:
+Covers passcode verification only — the legacy ``validate_api_token``
+dependency + ``/tokens/verify`` endpoint were retired by Syntropy-Journals
+issue #397 (consuming app moved to Unkey-managed tokens).
+
+Verifies:
 - PasscodeBody model construction and validation
-- validate_api_token exception → HTTPException mapping (mocked verify_token)
 - validate_passcode exception → HTTPException mapping (mocked verify_passcode)
-- create_token_router structure and configuration
+- create_token_router structure (passcode-only)
 - register_auth_api app integration
-- End-to-end HTTP via FastAPI TestClient (mocked verify functions)
+- End-to-end HTTP via FastAPI TestClient (mocked verify_passcode)
 """
 
 from unittest.mock import MagicMock, patch
@@ -19,19 +22,13 @@ from custom_components.reflex_clerk_api.fastapi_helpers import (
     PasscodeBody,
     create_token_router,
     register_auth_api,
-    validate_api_token,
     validate_passcode,
 )
 from custom_components.reflex_clerk_api.token_config import (
     ExpiredPasscodeError,
-    ExpiredTokenError,
     InvalidPasscodeError,
-    InvalidTokenError,
     PasscodeError,
     PasscodeVerification,
-    RevokedTokenError,
-    TokenError,
-    TokenVerification,
 )
 
 # ---------------------------------------------------------------------------
@@ -59,85 +56,6 @@ class TestPasscodeBody:
     def test_model_fields(self):
         fields = set(PasscodeBody.model_fields.keys())
         assert fields == {"code", "user_identifier", "channel"}
-
-
-# ---------------------------------------------------------------------------
-# validate_api_token tests (mocked verify_token)
-# ---------------------------------------------------------------------------
-
-
-class TestValidateApiToken:
-    """Tests for validate_api_token FastAPI dependency."""
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_success(self, mock_verify):
-        """Successful verification returns TokenVerification."""
-        expected = TokenVerification(
-            user_id="user_abc", token_id="tok-1", name="My Key"
-        )
-        mock_verify.return_value = expected
-        creds = MagicMock()
-        creds.credentials = "myapp_abc123_secretpart"
-
-        result = validate_api_token(credentials=creds)
-        assert result == expected
-        mock_verify.assert_called_once_with("myapp_abc123_secretpart")
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_token_error_raises_401(self, mock_verify):
-        mock_verify.side_effect = TokenError("Token issuance not configured.")
-        creds = MagicMock()
-        creds.credentials = "bad_token"
-
-        with pytest.raises(Exception) as exc_info:
-            validate_api_token(credentials=creds)
-        assert exc_info.value.status_code == 401
-        assert "not configured" in exc_info.value.detail
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_invalid_token_raises_401(self, mock_verify):
-        mock_verify.side_effect = InvalidTokenError("Token prefix does not match")
-        creds = MagicMock()
-        creds.credentials = "wrong_prefix"
-
-        with pytest.raises(Exception) as exc_info:
-            validate_api_token(credentials=creds)
-        assert exc_info.value.status_code == 401
-        assert "prefix" in exc_info.value.detail
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_expired_token_raises_401(self, mock_verify):
-        mock_verify.side_effect = ExpiredTokenError("Token has expired")
-        creds = MagicMock()
-        creds.credentials = "expired_token"
-
-        with pytest.raises(Exception) as exc_info:
-            validate_api_token(credentials=creds)
-        assert exc_info.value.status_code == 401
-        assert "expired" in exc_info.value.detail
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_revoked_token_raises_401(self, mock_verify):
-        mock_verify.side_effect = RevokedTokenError("Token has been revoked")
-        creds = MagicMock()
-        creds.credentials = "revoked_token"
-
-        with pytest.raises(Exception) as exc_info:
-            validate_api_token(credentials=creds)
-        assert exc_info.value.status_code == 401
-        assert "revoked" in exc_info.value.detail
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_exception_chaining(self, mock_verify):
-        """HTTPException should chain the original exception."""
-        original = InvalidTokenError("Token not found")
-        mock_verify.side_effect = original
-        creds = MagicMock()
-        creds.credentials = "unknown"
-
-        with pytest.raises(Exception) as exc_info:
-            validate_api_token(credentials=creds)
-        assert exc_info.value.__cause__ is original
 
 
 # ---------------------------------------------------------------------------
@@ -209,12 +127,16 @@ class TestValidatePasscode:
 
 
 # ---------------------------------------------------------------------------
-# create_token_router tests
+# create_token_router tests (passcode-only after #397)
 # ---------------------------------------------------------------------------
 
 
 class TestCreateTokenRouter:
-    """Tests for the create_token_router factory."""
+    """Tests for the create_token_router factory.
+
+    NOTE: function name preserved for backward compat with downstream
+    consumers; it now creates only the passcode router.
+    """
 
     def test_returns_api_router(self):
         from fastapi import APIRouter
@@ -234,10 +156,11 @@ class TestCreateTokenRouter:
         router = create_token_router(tags=["custom-auth"])
         assert router.tags == ["custom-auth"]
 
-    def test_has_token_verify_route(self):
+    def test_no_token_verify_route(self):
+        """``/tokens/verify`` was retired by Syntropy-Journals #397."""
         router = create_token_router()
         paths = [route.path for route in router.routes]
-        assert "/auth/tokens/verify" in paths
+        assert "/auth/tokens/verify" not in paths
 
     def test_has_passcode_verify_route(self):
         router = create_token_router()
@@ -298,57 +221,18 @@ class TestRegisterAuthApi:
 
 
 # ---------------------------------------------------------------------------
-# TestClient integration tests (mocked verify functions)
+# TestClient integration tests (mocked verify_passcode)
 # ---------------------------------------------------------------------------
 
 
-class TestTokenRouterIntegration:
-    """End-to-end HTTP tests using FastAPI TestClient with mocked verify functions."""
+class TestPasscodeRouterIntegration:
+    """End-to-end HTTP tests using FastAPI TestClient with mocked verify_passcode."""
 
     def _make_app(self) -> FastAPI:
         app = FastAPI()
         router = create_token_router(prefix="/auth")
         app.include_router(router)
         return app
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_token_verify_success(self, mock_verify):
-        mock_verify.return_value = TokenVerification(
-            user_id="user_abc", token_id="tok-1", name="My Key"
-        )
-        client = TestClient(self._make_app())
-
-        response = client.post(
-            "/auth/tokens/verify",
-            headers={"Authorization": "Bearer myapp_abc123_secret"},
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["user_id"] == "user_abc"
-        assert data["token_id"] == "tok-1"
-        assert data["name"] == "My Key"
-
-    def test_token_verify_no_header_returns_401(self):
-        """HTTPBearer returns 401 when Authorization header is missing."""
-        client = TestClient(self._make_app())
-
-        response = client.post("/auth/tokens/verify")
-
-        assert response.status_code == 401
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_token")
-    def test_token_verify_invalid_returns_401(self, mock_verify):
-        mock_verify.side_effect = InvalidTokenError("Token not found")
-        client = TestClient(self._make_app())
-
-        response = client.post(
-            "/auth/tokens/verify",
-            headers={"Authorization": "Bearer invalid_token"},
-        )
-
-        assert response.status_code == 401
-        assert "Token not found" in response.json()["detail"]
 
     @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_passcode")
     def test_passcode_verify_success(self, mock_verify):
@@ -403,24 +287,3 @@ class TestTokenRouterIntegration:
 
         assert response.status_code == 401
         assert "No valid passcode" in response.json()["detail"]
-
-    @patch("custom_components.reflex_clerk_api.fastapi_helpers.verify_passcode")
-    def test_passcode_verify_default_channel(self, mock_verify):
-        """Channel defaults to 'default' when omitted."""
-        mock_verify.return_value = PasscodeVerification(
-            user_id="user_abc",
-            passcode_id="pc-1",
-            user_identifier="user@test.com",
-            channel="default",
-        )
-        client = TestClient(self._make_app())
-
-        response = client.post(
-            "/auth/passcodes/verify",
-            json={"code": "123456", "user_identifier": "user@test.com"},
-        )
-
-        assert response.status_code == 200
-        mock_verify.assert_called_once_with(
-            code="123456", user_identifier="user@test.com", channel="default"
-        )
