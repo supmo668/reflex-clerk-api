@@ -7,76 +7,7 @@ They use SQLModel/SQLAlchemy introspection to check table definitions.
 import uuid
 from datetime import datetime, timezone
 
-from custom_components.reflex_clerk_api.token_models import ApiToken, Passcode
-
-
-class TestApiTokenModel:
-    """Tests for ApiToken model definition."""
-
-    def test_tablename(self):
-        assert ApiToken.__tablename__ == "clerk_api_tokens"
-
-    def test_has_required_columns(self):
-        columns = {c.name for c in ApiToken.__table__.columns}
-        expected = {
-            "id",
-            "user_id",
-            "name",
-            "prefix",
-            "short_token",
-            "long_token_hash",
-            "is_active",
-            "expires_at",
-            "last_used_at",
-            "revoked_at",
-            "revocation_reason",
-            "created_at",
-            "updated_at",
-        }
-        assert expected.issubset(columns)
-
-    def test_primary_key(self):
-        pk_cols = [c.name for c in ApiToken.__table__.primary_key.columns]
-        assert pk_cols == ["id"]
-
-    def test_short_token_unique(self):
-        col = ApiToken.__table__.c.short_token
-        assert col.unique is True
-
-    def test_default_is_active(self):
-        token = ApiToken(
-            user_id="user_123",
-            name="Test",
-            prefix="test_",
-            short_token="abc123",
-            long_token_hash="hash123",
-        )
-        assert token.is_active is True
-
-    def test_default_id_generated(self):
-        token = ApiToken(
-            user_id="user_123",
-            name="Test",
-            prefix="test_",
-            short_token="abc123",
-            long_token_hash="hash123",
-        )
-        assert token.id is not None
-        # Should be a valid UUID string
-        uuid.UUID(token.id)
-
-    def test_nullable_fields(self):
-        token = ApiToken(
-            user_id="user_123",
-            name="Test",
-            prefix="test_",
-            short_token="abc123",
-            long_token_hash="hash123",
-        )
-        assert token.expires_at is None
-        assert token.last_used_at is None
-        assert token.revoked_at is None
-        assert token.revocation_reason is None
+from custom_components.reflex_clerk_api.token_models import Passcode
 
 
 class TestPasscodeModel:

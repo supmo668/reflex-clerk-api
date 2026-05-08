@@ -6,99 +6,27 @@ consumers must run::
 
     reflex db makemigrations --message "add clerk token tables"
     reflex db migrate
+
+The legacy ``ApiToken`` model + its split-token issuance/verification
+pipeline was retired by Syntropy-Journals issue #397 — the consuming
+app moved to Unkey-managed tokens and the lib's ``clerk_api_tokens``
+table created Alembic metadata drift on every autogenerate run.
+``Passcode`` (below) is the only remaining model in this module.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 import reflex as rx
 import sqlalchemy
-from sqlalchemy import JSON, DateTime, String
+from sqlalchemy import DateTime, String
 from sqlmodel import Column, Field
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-class ApiToken(rx.Model, table=True):
-    """Represents a user-issued API token.
-
-    Tokens use the split-token pattern:
-    - short_token: stored plaintext, indexed for O(1) lookup
-    - long_token_hash: SHA-256 hash of the secret portion
-
-    The full token string ({prefix}{short_token}_{long_token}) is only
-    available at creation time and must not be stored.
-    """
-
-    __tablename__ = "clerk_api_tokens"
-    __table_args__ = {"extend_existing": True}
-
-    id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()),
-        primary_key=True,
-        sa_type=String(36),
-    )
-    user_id: str = Field(index=True, nullable=False, sa_type=String(255))
-    name: str = Field(nullable=False, sa_type=String(255))
-    origin: str = Field(default="user", nullable=False, sa_type=String(50))
-    prefix: str = Field(nullable=False, sa_type=String(50))
-    short_token: str = Field(
-        unique=True,
-        index=True,
-        nullable=False,
-        sa_type=String(50),
-    )
-    long_token_hash: str = Field(nullable=False, sa_type=String(64))
-    # Scopes granted to this token. Consuming services (MCP servers, API routes)
-    # check these scopes to authorize actions. Default grants legacy health:*
-    # access so pre-scope-era tokens continue working post-migration.
-    scopes: list[str] = Field(
-        default_factory=lambda: ["health:read", "health:write"],
-        sa_column=Column(
-            "scopes",
-            JSON,
-            server_default='["health:read", "health:write"]',
-            nullable=False,
-        ),
-    )
-    is_active: bool = Field(default=True, nullable=False)
-    expires_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column("expires_at", DateTime(timezone=True), nullable=True),
-    )
-    last_used_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column("last_used_at", DateTime(timezone=True), nullable=True),
-    )
-    revoked_at: Optional[datetime] = Field(
-        default=None,
-        sa_column=Column("revoked_at", DateTime(timezone=True), nullable=True),
-    )
-    revocation_reason: Optional[str] = Field(default=None, sa_type=String(500))
-    created_at: datetime = Field(
-        default_factory=_utc_now,
-        sa_column=Column(
-            "created_at",
-            DateTime(timezone=True),
-            server_default=sqlalchemy.func.now(),
-            nullable=False,
-        ),
-    )
-    updated_at: datetime = Field(
-        default_factory=_utc_now,
-        sa_column=Column(
-            "updated_at",
-            DateTime(timezone=True),
-            server_default=sqlalchemy.func.now(),
-            onupdate=sqlalchemy.func.now(),
-            nullable=False,
-        ),
-    )
 
 
 class Passcode(rx.Model, table=True):

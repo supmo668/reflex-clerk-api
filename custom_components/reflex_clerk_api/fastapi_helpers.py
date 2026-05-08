@@ -1,73 +1,34 @@
-"""FastAPI integration helpers for token and passcode verification.
+"""FastAPI integration helpers for passcode verification.
 
-Provides ``Depends()``-compatible dependency functions, a pre-built router
+Provides a ``Depends()``-compatible dependency function, a pre-built router
 factory, and a one-line registration helper for Reflex apps.
 
-Quick start — protect a single endpoint::
+The legacy ``validate_api_token`` dependency + ``/tokens/verify`` endpoint
+were removed by Syntropy-Journals issue #397 (the consuming app moved to
+Unkey-managed tokens; the lib's own token issuance pipeline was retired).
+``validate_passcode`` and the passcode router survive — passcodes are
+short-lived single-use codes, separate from API tokens.
 
-    from reflex_clerk_api import validate_api_token, TokenVerification
-    from fastapi import Depends
-
-    @router.get("/protected")
-    def my_endpoint(auth: TokenVerification = Depends(validate_api_token)):
-        print(auth.user_id)
-
-Quick start — register pre-built endpoints on a Reflex app::
+Quick start — register pre-built endpoint on a Reflex app::
 
     import reflex_clerk_api as clerk
 
     app = rx.App()
-    clerk.wrap_app(app, publishable_key=..., token_prefix="myapp_", register_api=True)
-    # Endpoints available: POST /auth/tokens/verify, POST /auth/passcodes/verify
+    clerk.wrap_app(app, publishable_key=..., register_api=True)
+    # Endpoint available: POST /auth/passcodes/verify
 """
 
 from __future__ import annotations
 
 import reflex as rx
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel
 
-from .clerk_provider import verify_passcode, verify_token
+from .clerk_provider import verify_passcode
 from .token_config import (
     PasscodeError,
     PasscodeVerification,
-    TokenError,
-    TokenVerification,
 )
-
-_bearer_scheme = HTTPBearer()
-
-
-def validate_api_token(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
-) -> TokenVerification:
-    """FastAPI dependency: validate an API token from the Authorization header.
-
-    Extracts the Bearer token from the ``Authorization`` header and verifies it
-    using :func:`verify_token`.
-
-    Args:
-        credentials: Automatically injected by FastAPI from the Authorization header.
-
-    Returns:
-        TokenVerification with ``user_id``, ``token_id``, and ``name``.
-
-    Raises:
-        HTTPException: 401 if the token is invalid, expired, revoked, or missing.
-
-    Examples::
-
-        @router.get("/protected")
-        def my_endpoint(
-            auth: TokenVerification = Depends(clerk.validate_api_token),
-        ):
-            return {"user_id": auth.user_id}
-    """
-    try:
-        return verify_token(credentials.credentials)
-    except TokenError as e:
-        raise HTTPException(status_code=401, detail=str(e)) from e
 
 
 class PasscodeBody(BaseModel):
@@ -126,11 +87,15 @@ def create_token_router(
     prefix: str = "/auth",
     tags: list[str] | None = None,
 ) -> APIRouter:
-    """Create a FastAPI APIRouter with token and passcode verification endpoints.
+    """Create a FastAPI APIRouter with passcode verification endpoints.
 
-    This is a convenience factory.  Consumers can also use
-    :func:`validate_api_token` and :func:`validate_passcode` directly as
-    dependencies on their own routes.
+    This is a convenience factory. Consumers can also use
+    :func:`validate_passcode` directly as a dependency on their own routes.
+
+    The function name is preserved for backward compat with downstream
+    consumers; it now creates only the passcode router (the
+    ``/tokens/verify`` endpoint was retired by Syntropy-Journals
+    issue #397 — see module docstring).
 
     Args:
         prefix: URL prefix for the router (default ``"/auth"``).
@@ -139,7 +104,6 @@ def create_token_router(
     Returns:
         A FastAPI ``APIRouter`` with:
 
-        - ``POST {prefix}/tokens/verify`` — verify a Bearer token
         - ``POST {prefix}/passcodes/verify`` — verify a passcode from body
 
     Examples::
@@ -148,22 +112,13 @@ def create_token_router(
 
         router = create_token_router(prefix="/auth")
         fastapi_app.include_router(router)
-        # Endpoints: POST /auth/tokens/verify, POST /auth/passcodes/verify
+        # Endpoint: POST /auth/passcodes/verify
     """
     if tags is None:
         tags = ["auth"]
     router = APIRouter(prefix=prefix, tags=tags)
 
-    @router.post("/tokens/verify")
-    def verify_token_endpoint(
-        verification: TokenVerification = Depends(validate_api_token),
-    ) -> dict:
-        """Verify an API token from the Authorization: Bearer header."""
-        return {
-            "user_id": verification.user_id,
-            "token_id": verification.token_id,
-            "name": verification.name,
-        }
+    from fastapi import Depends
 
     @router.post("/passcodes/verify")
     def verify_passcode_endpoint(
