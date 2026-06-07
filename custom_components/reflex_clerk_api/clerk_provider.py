@@ -363,8 +363,22 @@ class ClerkUser(rx.State):
             handler: The event handler to register. Must be an
                 ``rx.EventHandler`` (decorated with ``@rx.event`` or
                 ``@rx.event(background=True)``).
+
+        Raises:
+            TypeError: If ``handler`` is not an ``rx.EventHandler``.
+                Use ``raise`` (not ``assert``) because ``assert`` is
+                stripped under ``python -O`` — a misregistered handler
+                would silently become a no-op in optimised production
+                deploys, exactly the kind of failure mode this hook
+                exists to prevent.
         """
-        assert isinstance(handler, rx.EventHandler)
+        if not isinstance(handler, rx.EventHandler):
+            raise TypeError(
+                "ClerkUser.register_dependent_handler expects an rx.EventHandler "
+                f"(decorated with @rx.event), got {type(handler).__name__}. "
+                "Did you pass the method without the decorator, or pass an "
+                "EventSpec instead of the handler itself?"
+            )
         hash_id = hash((handler.state_full_name, handler.fn))
         logging.debug(f"ClerkUser dependent hash_id: {hash_id}")
         cls._dependent_handlers[hash_id] = handler
