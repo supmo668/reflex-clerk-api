@@ -157,7 +157,26 @@ class ClerkState(rx.State):
             return ClerkState.clear_clerk_session
         try:
             # Validate the token according to the claim options (e.g. iss, exp, nbf, azp.)
-            decoded.validate()
+            #
+            # ``leeway=60`` — RFC 7519 §4.1.6 clock-skew tolerance.  authlib
+            # defaults leeway to 0 seconds, which rejects any token whose
+            # ``iat`` is even a few milliseconds ahead of the validator's
+            # clock — a routine condition between an external issuer
+            # (Clerk's edge) and a local backend even when both are NTP-
+            # synced (network latency + sub-second NTP drift).  60s matches
+            # Clerk's own SDK default and the industry-standard tolerance
+            # for cross-host JWT validation.  See
+            # ``docs/operations/jwt-clock-skew-runbook.md`` for the full
+            # rationale + a checklist for new JWT verifiers.
+            decoded.validate(leeway=60)
+        except jose_errors.InvalidTokenError as e:
+            # ``InvalidTokenError`` covers the *temporal* claim failures
+            # (iat-in-future / exp-passed / nbf-not-yet).  Even with the
+            # 60s leeway above, larger clock skews or genuinely-expired
+            # tokens still raise — handle them gracefully instead of
+            # propagating to Reflex's error UI as a 500.
+            logging.warning(f"JWT temporal claim invalid (clock skew or expired): {e}")
+            return ClerkState.clear_clerk_session
         except (jose_errors.InvalidClaimError, jose_errors.MissingClaimError) as e:
             logging.warning(f"JWT token is invalid: {e}")
             return ClerkState.clear_clerk_session
