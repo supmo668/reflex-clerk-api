@@ -1,4 +1,4 @@
-__version__ = "1.2.4"
+__version__ = "1.3.1"
 
 from .authentication_components import sign_in, sign_up
 from .clerk_provider import (
@@ -73,10 +73,14 @@ __all__ = [
     "clerk_loaded",
     "clerk_loading",
     "clerk_provider",
+    "create_organization",
     "create_token_router",
     "get_user",
     "issue_passcode",
     "on_load",
+    "organization_list",
+    "organization_profile",
+    "organization_switcher",
     "protect",
     "redirect_to_user_profile",
     "register_auth_api",
