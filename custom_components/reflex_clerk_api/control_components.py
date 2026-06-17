@@ -1,3 +1,5 @@
+import reflex as rx
+
 from reflex_clerk_api.base import ClerkBase
 
 Javascript = str
@@ -93,3 +95,32 @@ redirect_to_organization_profile = RedirectToOrganizationProfile.create
 redirect_to_create_organization = RedirectToCreateOrganization.create
 signed_in = SignedIn.create
 signed_out = SignedOut.create
+
+
+def _neutral_skeleton() -> rx.Component:
+    return rx.box(rx.spinner(), width="100%", min_height="2rem")
+
+
+def auth_gate(
+    *children: rx.Component,
+    fallback: rx.Component | None = None,
+    redirect: bool = True,
+) -> rx.Component:
+    """SSR-safe, fail-closed auth gate composed over Clerk control components.
+
+    - clerk_loading OR signed_out  → render `fallback` (skeleton).
+    - clerk_loaded ∧ signed_in     → render `children` (only path that shows protected content).
+    - clerk_loaded ∧ signed_out ∧ redirect → fire exactly one redirect_to_sign_in.
+    - Unresolved/default (SSR/hydration) → fallback, never children.
+    """
+    fb = fallback if fallback is not None else _neutral_skeleton()
+    return rx.fragment(
+        clerk_loading(fb),
+        clerk_loaded(
+            signed_in(*children),
+            signed_out(
+                fb,
+                redirect_to_sign_in() if redirect else rx.fragment(),
+            ),
+        ),
+    )

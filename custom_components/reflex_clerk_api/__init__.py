@@ -15,6 +15,7 @@ from .clerk_provider import (
     wrap_app,
 )
 from .control_components import (
+    auth_gate,
     clerk_loaded,
     clerk_loading,
     protect,
@@ -26,17 +27,17 @@ from .control_components import (
     signed_in,
     signed_out,
 )
-from .organization_components import (
-    create_organization,
-    organization_list,
-    organization_profile,
-    organization_switcher,
-)
 from .fastapi_helpers import (
     PasscodeBody,
     create_token_router,
     register_auth_api,
     validate_passcode,
+)
+from .organization_components import (
+    create_organization,
+    organization_list,
+    organization_profile,
+    organization_switcher,
 )
 from .pages import add_sign_in_page, add_sign_up_page
 from .token_config import (
@@ -57,10 +58,6 @@ from .unstyled_components import (
 from .user_components import user_button, user_profile
 
 __all__ = [
-    "create_organization",
-    "organization_list",
-    "organization_profile",
-    "organization_switcher",
     "ClerkState",
     "ClerkUser",
     "ExpiredPasscodeError",
@@ -74,19 +71,24 @@ __all__ = [
     "TokenConfig",
     "add_sign_in_page",
     "add_sign_up_page",
+    "auth_gate",
     "clerk_loaded",
     "clerk_loading",
+    "clerk_provider",
+    "create_organization",
+    "create_token_router",
+    "get_user",
+    "issue_passcode",
+    "on_load",
+    "organization_list",
+    "organization_profile",
+    "organization_switcher",
     "protect",
     "redirect_to_create_organization",
     "redirect_to_organization_profile",
     "redirect_to_sign_in",
     "redirect_to_sign_up",
     "redirect_to_user_profile",
-    "clerk_provider",
-    "create_token_router",
-    "get_user",
-    "issue_passcode",
-    "on_load",
     "register_auth_api",
     "register_on_auth_change_handler",
     "sign_in",
