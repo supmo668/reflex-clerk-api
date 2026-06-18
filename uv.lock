@@ -1526,7 +1526,7 @@ dev = [
 requires-dist = [
     { name = "authlib", specifier = ">=1.5.1,<2.0.0" },
     { name = "build", marker = "extra == 'dev'" },
-    { name = "clerk-backend-api", specifier = ">=2.0.0,<3.0.0" },
+    { name = "clerk-backend-api", specifier = ">=2.0.0,<6.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "reflex", specifier = ">=0.8.0" },
     { name = "twine", marker = "extra == 'dev'" },
