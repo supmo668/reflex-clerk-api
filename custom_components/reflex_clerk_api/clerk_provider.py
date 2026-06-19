@@ -304,6 +304,25 @@ class ClerkUser(rx.State):
     This only contains a subset of the information available. Create your own state if you need more.
 
     Note: For this to be updated on login/logout events, it must be registered on the ClerkState.
+
+    Consumers can also register events to fire when ClerkUser itself
+    updates (via :meth:`register_dependent_handler`). This mirrors the
+    ``ClerkState.register_dependent_handler`` pattern and solves the
+    hydration race where ``ClerkState.is_signed_in`` flips True before
+    ``ClerkUser.load_user`` completes its HTTP fetch — without it,
+    consumer-side ``sync_auth_state``-style handlers can read
+    ``email_address`` as the empty default and bail before ClerkUser
+    has populated.
+
+    Registration order (recommended in consumer code)::
+
+        clerk.ClerkState.register_dependent_handler(MyAuthState.sync)
+        clerk.ClerkUser.register_dependent_handler(MyAuthState.sync)
+        clerk.ClerkState.register_dependent_handler(clerk.ClerkUser.load_user)
+
+    With both registrations, ``MyAuthState.sync`` fires on ClerkState
+    changes AND again after each ClerkUser refresh — so the second run
+    always sees the freshly-loaded user fields.
     """
 
     first_name: str = ""
@@ -325,15 +344,55 @@ class ClerkUser(rx.State):
 
     # Set to True when the state is registered on the ClerkState to avoid registering it multiple times.
     _is_registered: ClassVar[bool] = False
+    _dependent_handlers: ClassVar[dict[int, EventCallback]] = {}
+    """Handlers to fire after every :meth:`load_user` run. See class
+    docstring for the hydration-race rationale and the recommended
+    registration order."""
+
+    @classmethod
+    def register_dependent_handler(cls, handler: EventCallback) -> None:
+        """Register a handler to be called every time ClerkUser updates.
+
+        Mirrors ``ClerkState.register_dependent_handler``. Use this when
+        the consumer needs to react to the user fields (email, metadata,
+        etc.) being freshly populated — for example, an admin-allowlist
+        gate that reads ``email_address`` will silently fail on an
+        empty value if it only registers against ClerkState.
+
+        Args:
+            handler: The event handler to register. Must be an
+                ``rx.EventHandler`` (decorated with ``@rx.event`` or
+                ``@rx.event(background=True)``).
+
+        Raises:
+            TypeError: If ``handler`` is not an ``rx.EventHandler``.
+                Use ``raise`` (not ``assert``) because ``assert`` is
+                stripped under ``python -O`` — a misregistered handler
+                would silently become a no-op in optimised production
+                deploys, exactly the kind of failure mode this hook
+                exists to prevent.
+        """
+        if not isinstance(handler, rx.EventHandler):
+            raise TypeError(
+                "ClerkUser.register_dependent_handler expects an rx.EventHandler "
+                f"(decorated with @rx.event), got {type(handler).__name__}. "
+                "Did you pass the method without the decorator, or pass an "
+                "EventSpec instead of the handler itself?"
+            )
+        hash_id = hash((handler.state_full_name, handler.fn))
+        logging.debug(f"ClerkUser dependent hash_id: {hash_id}")
+        cls._dependent_handlers[hash_id] = handler
 
     @rx.event
-    async def load_user(self) -> None:
+    async def load_user(self) -> EventType:
         try:
             user: clerk_backend_api.models.User = await get_user(self)
         except MissingUserError:
             logging.debug("Clearing user state")
             self.reset()
-            return
+            # Fire dependent handlers even on clear — consumers may need
+            # to react to a sign-out (e.g. reset their own cached state).
+            return list(self._dependent_handlers.values())
 
         logging.debug("Updating user state")
         self.first_name = (
@@ -392,6 +451,12 @@ class ClerkUser(rx.State):
             and user.unsafe_metadata != clerk_backend_api.UNSET
             else {}
         )
+
+        # Fire dependent handlers after the user fields are fully populated.
+        # See class docstring for the hydration-race rationale: consumers
+        # that gate on ``email_address`` or ``public_metadata`` need to
+        # re-run AFTER this method finishes, not just on ClerkState changes.
+        return list(self._dependent_handlers.values())
 
     @rx.event
     async def update_metadata(
