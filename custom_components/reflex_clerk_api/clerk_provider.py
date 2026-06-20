@@ -665,7 +665,32 @@ class ClerkProvider(ClerkBase):
 
     @classmethod
     def create(cls, *children, **props) -> Self:
+        # Wire Clerk's routerPush / routerReplace to the host React Router's
+        # navigate, UNLESS the consumer overrode them. This is the canonical
+        # Clerk integration pattern for any framework that owns its routing
+        # (Next.js / Remix / React Router SDKs all do this): without it, Clerk's
+        # multi-step components (<SignIn> / <SignUp>) perform FULL-PAGE browser
+        # navigations between steps instead of client-side ones, which remounts
+        # the component and re-fires prepare_first_factor → DUPLICATE
+        # verification email/SMS, and drops the in-memory session across the
+        # post-auth redirect. Reflex generates a `react-router` app, so the
+        # `useNavigate()` hook injected below (add_hooks) is in scope here.
+        props.setdefault(
+            "router_push", rx.Var(_js_expr="__clerk_router_navigate")
+        )
+        props.setdefault(
+            "router_replace",
+            rx.Var(_js_expr="((to) => __clerk_router_navigate(to, { replace: true }))"),
+        )
         return cast(Self, super().create(*children, **props))
+
+    def add_imports(self) -> rx.ImportDict:
+        # React Router (Reflex's router) — provides client-side navigation so
+        # Clerk doesn't full-page-reload between auth steps.
+        return {"react-router": ["useNavigate"]}
+
+    def add_hooks(self) -> list[str]:
+        return ["const __clerk_router_navigate = useNavigate();"]
 
     def add_custom_code(self) -> list[str]:
         return []
