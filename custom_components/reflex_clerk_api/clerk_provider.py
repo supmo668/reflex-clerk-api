@@ -169,12 +169,16 @@ class ClerkState(rx.State):
             # ``docs/operations/jwt-clock-skew-runbook.md`` for the full
             # rationale + a checklist for new JWT verifiers.
             decoded.validate(leeway=60)
-        except jose_errors.InvalidTokenError as e:
-            # ``InvalidTokenError`` covers the *temporal* claim failures
-            # (iat-in-future / exp-passed / nbf-not-yet).  Even with the
-            # 60s leeway above, larger clock skews or genuinely-expired
-            # tokens still raise — handle them gracefully instead of
-            # propagating to Reflex's error UI as a 500.
+        except (jose_errors.ExpiredTokenError, jose_errors.InvalidTokenError) as e:
+            # Temporal claim failures. authlib raises ``ExpiredTokenError`` for
+            # exp-passed and ``InvalidTokenError`` for nbf-not-yet /
+            # iat-in-future. They are SIBLINGS (both subclass ``JoseError``
+            # directly) — catching ``InvalidTokenError`` alone let an expired
+            # token escape, leaving the session neither set nor cleared, so
+            # ``auth_checked`` never flipped and auth-gated pages hung.
+            # Even with the 60s leeway above, larger clock skews or
+            # genuinely-expired tokens still raise — clear the session
+            # instead of propagating to Reflex's error UI.
             logging.warning(f"JWT temporal claim invalid (clock skew or expired): {e}")
             return ClerkState.clear_clerk_session
         except (jose_errors.InvalidClaimError, jose_errors.MissingClaimError) as e:
