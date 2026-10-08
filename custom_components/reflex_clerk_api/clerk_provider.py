@@ -174,11 +174,14 @@ class ClerkState(rx.State):
         except (
             jose_errors.DecodeError,
             jose_errors.BadSignatureError,
+            jose_errors.JoseError,
             ValueError,
         ) as e:
             # DecodeError: malformed JWT. BadSignatureError: signed by a key we
             # do not hold under that kid. ValueError("Invalid JSON Web Key Set"):
             # authlib's error when no JWK matches the token's kid (key rotation).
+            # JoseError: any other authlib JOSE error (unsupported alg, bad
+            # header, ...) must clear, never escape (an escape hangs auth).
             # The ValueError catch is scoped to this jwt.decode call only.
             # On next attempt, new JWKs will be fetched.
             async with self:
@@ -236,6 +239,14 @@ class ClerkState(rx.State):
             return ClerkState.clear_clerk_session
         except (jose_errors.InvalidClaimError, jose_errors.MissingClaimError) as e:
             logging.warning(f"JWT token is invalid: {e}")
+            return ClerkState.clear_clerk_session
+        except jose_errors.JoseError as e:
+            # Catch-all for every other authlib JOSE error. Any JoseError that
+            # escapes this handler leaves ``auth_checked`` False and hangs every
+            # auth-gated page (the 2026-10-03 P0). Clear, never raise.
+            async with self:
+                self._auth_error = f"{type(e).__name__}: {e}"
+            logging.warning(f"JWT validation error: {type(e).__name__}: {e}")
             return ClerkState.clear_clerk_session
 
         async with self:
