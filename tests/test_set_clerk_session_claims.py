@@ -91,8 +91,13 @@ def _token(rsa_key, claims: dict[str, Any], kid: str = KID) -> str:
     return jwt.encode({"alg": "RS256", "kid": kid}, claims, rsa_key).decode()
 
 
+def _fn(handler: Any) -> Any:
+    """The undecorated handler (EventCallback.fn is untyped for pyright)."""
+    return getattr(handler, "fn")
+
+
 def _run(fake, token):
-    return asyncio.run(ClerkState.set_clerk_session.fn(fake, token))
+    return asyncio.run(_fn(ClerkState.set_clerk_session)(fake, token))
 
 
 def _claims(**overrides: Any) -> dict[str, Any]:
@@ -242,5 +247,5 @@ def test_clear_marks_auth_checked():
         _dependent_handlers = ClerkState._dependent_handlers
 
     s = _S()
-    ClerkState.clear_clerk_session.fn(s)
+    _fn(ClerkState.clear_clerk_session)(s)
     assert s.auth_checked is True

@@ -754,7 +754,7 @@ class ClerkProvider(ClerkBase):
         # Clerk doesn't full-page-reload between auth steps.
         return {"react-router": ["useNavigate"]}
 
-    def add_hooks(self) -> list[str]:
+    def add_hooks(self) -> list[str | rx.Var]:
         return ["const __clerk_router_navigate = useNavigate();"]
 
     def add_custom_code(self) -> list[str]:
