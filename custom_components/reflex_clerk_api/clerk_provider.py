@@ -56,6 +56,13 @@ class ClerkState(rx.State):
     user_id: str | None = None
     """The clerk user ID of the user, if they are logged in."""
 
+    _auth_error: str = ""
+    """Last JWT decode/signature failure (``"<ErrorClass>: <message>"``), for debugging."""
+    _expired_refresh_attempts: int = 0
+    """Fresh-token requests made in the current refresh window (see set_clerk_session)."""
+    _expired_refresh_window_start: float = 0.0
+    """``time.time()`` at which the current refresh window opened."""
+
     # NOTE: ClassVar tells reflex it doesn't need to include these in the persisted state per instance.
     _auth_wait_timeout_seconds: ClassVar[float] = 1.0
     _secret_key: ClassVar[str | None] = None
@@ -66,6 +73,18 @@ class ClerkState(rx.State):
     _jwk_keys: ClassVar[dict[str, Any] | None] = None
     "JWK keys from Clerk for decoding any users JWT tokens (only required once per instance)."
     _last_jwk_reset: ClassVar[float] = 0.0
+    _expired_refresh_max_attempts: ClassVar[int] = 1
+    """How many fresh tokens to request for an expired one before clearing the session."""
+    _expired_refresh_window_seconds: ClassVar[float] = 30.0
+    """The refresh budget above renews after this many seconds."""
+    _fresh_token_js: ClassVar[str] = (
+        "Promise.resolve((window.Clerk && window.Clerk.session)"
+        " ? window.Clerk.session.getToken({skipCache: true}) : null)"
+        ".catch(() => null)"
+    )
+    """Ask Clerk-JS for a freshly minted session token. Resolves to null (never
+    rejects) when there is no session or the refresh fails, so the callback always
+    fires and the backend always reaches a terminal state."""
     _claims_options: ClassVar[dict[str, Any]] = {
         # "iss": {"value": "https://<your-iss>.clerk.accounts.dev"},
         "exp": {"essential": True},
@@ -142,18 +161,33 @@ class ClerkState(rx.State):
         Note: Only the parts that modify the per-instance state need to be in an `async with self` block.
         """
         logging.debug("Setting Clerk session")
+        if not token or not isinstance(token, str) or not token.strip():
+            # Null/empty: the fresh-token request found no Clerk-JS session (or
+            # the frontend sent nothing). Nothing to validate — signed out.
+            logging.info("Empty Clerk token; clearing session")
+            return ClerkState.clear_clerk_session
         jwks = await self._get_jwk_keys()
         try:
             decoded: JWTClaims = jwt.decode(
                 token, {"keys": jwks}, claims_options=self._claims_options
             )
-        except jose_errors.DecodeError as e:
-            # E.g. DecodeError -- Something went wrong just getting the JWT
-            # On next attempt, new JWKs will be fetched
+        except (
+            jose_errors.DecodeError,
+            jose_errors.BadSignatureError,
+            jose_errors.JoseError,
+            ValueError,
+        ) as e:
+            # DecodeError: malformed JWT. BadSignatureError: signed by a key we
+            # do not hold under that kid. ValueError("Invalid JSON Web Key Set"):
+            # authlib's error when no JWK matches the token's kid (key rotation).
+            # JoseError: any other authlib JOSE error (unsupported alg, bad
+            # header, ...) must clear, never escape (an escape hangs auth).
+            # The ValueError catch is scoped to this jwt.decode call only.
+            # On next attempt, new JWKs will be fetched.
             async with self:
-                self.auth_error = e
+                self._auth_error = f"{type(e).__name__}: {e}"
             self._request_jwk_reset()
-            logging.warning(f"JWT decode error: {e}")
+            logging.warning(f"JWT decode error: {type(e).__name__}: {e}")
             return ClerkState.clear_clerk_session
         try:
             # Validate the token according to the claim options (e.g. iss, exp, nbf, azp.)
@@ -169,16 +203,50 @@ class ClerkState(rx.State):
             # ``docs/operations/jwt-clock-skew-runbook.md`` for the full
             # rationale + a checklist for new JWT verifiers.
             decoded.validate(leeway=60)
+        except jose_errors.ExpiredTokenError as e:
+            # ``ExpiredTokenError`` is a SIBLING of ``InvalidTokenError`` (both
+            # subclass ``JoseError`` directly). It used to escape this handler,
+            # leaving the session neither set nor cleared, so ``auth_checked``
+            # never flipped and auth-gated pages hung. A stale token is typical
+            # when returning from an external redirect (e.g. Stripe checkout)
+            # while Clerk-JS still holds a live session, so ask Clerk-JS for a
+            # FRESH token first instead of signing the user out. Bounded: after
+            # ``_expired_refresh_max_attempts`` requests in one window, clear.
+            now = time.time()
+            async with self:
+                if (
+                    now - self._expired_refresh_window_start
+                    > self._expired_refresh_window_seconds
+                ):
+                    self._expired_refresh_window_start = now
+                    self._expired_refresh_attempts = 0
+                refresh = (
+                    self._expired_refresh_attempts < self._expired_refresh_max_attempts
+                )
+                if refresh:
+                    self._expired_refresh_attempts += 1
+            if refresh:
+                logging.info(f"JWT expired; requesting a fresh token from Clerk: {e}")
+                return rx.call_script(
+                    self._fresh_token_js, callback=ClerkState.set_clerk_session
+                )
+            logging.warning(f"JWT still expired after refresh; clearing session: {e}")
+            return ClerkState.clear_clerk_session
         except jose_errors.InvalidTokenError as e:
-            # ``InvalidTokenError`` covers the *temporal* claim failures
-            # (iat-in-future / exp-passed / nbf-not-yet).  Even with the
-            # 60s leeway above, larger clock skews or genuinely-expired
-            # tokens still raise — handle them gracefully instead of
-            # propagating to Reflex's error UI as a 500.
-            logging.warning(f"JWT temporal claim invalid (clock skew or expired): {e}")
+            # nbf-not-yet / iat-in-future. Even with the 60s leeway above,
+            # larger clock skews still raise; a fresh token would not help.
+            logging.warning(f"JWT temporal claim invalid (clock skew): {e}")
             return ClerkState.clear_clerk_session
         except (jose_errors.InvalidClaimError, jose_errors.MissingClaimError) as e:
             logging.warning(f"JWT token is invalid: {e}")
+            return ClerkState.clear_clerk_session
+        except jose_errors.JoseError as e:
+            # Catch-all for every other authlib JOSE error. Any JoseError that
+            # escapes this handler leaves ``auth_checked`` False and hangs every
+            # auth-gated page (the 2026-10-03 P0). Clear, never raise.
+            async with self:
+                self._auth_error = f"{type(e).__name__}: {e}"
+            logging.warning(f"JWT validation error: {type(e).__name__}: {e}")
             return ClerkState.clear_clerk_session
 
         async with self:
@@ -186,6 +254,7 @@ class ClerkState(rx.State):
             self.claims = decoded
             self.user_id = str(decoded.get("sub"))
             self.auth_checked = True
+            self._expired_refresh_attempts = 0
         return list(self._dependent_handlers.values())
 
     @rx.event
@@ -376,8 +445,7 @@ class ClerkUser(rx.State):
         # Load metadata (dict fields; None/UNSET → empty dict)
         self.public_metadata = (
             dict(user.public_metadata)
-            if user.public_metadata
-            and user.public_metadata != clerk_backend_api.UNSET
+            if user.public_metadata and user.public_metadata != clerk_backend_api.UNSET
             else {}
         )
         self.private_metadata = (
@@ -388,8 +456,7 @@ class ClerkUser(rx.State):
         )
         self.unsafe_metadata = (
             dict(user.unsafe_metadata)
-            if user.unsafe_metadata
-            and user.unsafe_metadata != clerk_backend_api.UNSET
+            if user.unsafe_metadata and user.unsafe_metadata != clerk_backend_api.UNSET
             else {}
         )
 
@@ -492,7 +559,7 @@ class ClerkSessionSynchronizer(rx.Component):
         self,
     ) -> rx.ImportDict:
         addl_imports: rx.ImportDict = {
-            "@clerk/clerk-react": ["useAuth"],
+            "@clerk/clerk-react@5.61.3": ["useAuth"],
             "react": ["useContext", "useEffect"],
             "$/utils/context": ["EventLoopContext"],
             "$/utils/state": ["ReflexEvent"],
@@ -665,7 +732,30 @@ class ClerkProvider(ClerkBase):
 
     @classmethod
     def create(cls, *children, **props) -> Self:
+        # Wire Clerk's routerPush / routerReplace to the host React Router's
+        # navigate, UNLESS the consumer overrode them. This is the canonical
+        # Clerk integration pattern for any framework that owns its routing
+        # (Next.js / Remix / React Router SDKs all do this): without it, Clerk's
+        # multi-step components (<SignIn> / <SignUp>) perform FULL-PAGE browser
+        # navigations between steps instead of client-side ones, which remounts
+        # the component and re-fires prepare_first_factor → DUPLICATE
+        # verification email/SMS, and drops the in-memory session across the
+        # post-auth redirect. Reflex generates a `react-router` app, so the
+        # `useNavigate()` hook injected below (add_hooks) is in scope here.
+        props.setdefault("router_push", rx.Var(_js_expr="__clerk_router_navigate"))
+        props.setdefault(
+            "router_replace",
+            rx.Var(_js_expr="((to) => __clerk_router_navigate(to, { replace: true }))"),
+        )
         return cast(Self, super().create(*children, **props))
+
+    def add_imports(self) -> rx.ImportDict:
+        # React Router (Reflex's router) — provides client-side navigation so
+        # Clerk doesn't full-page-reload between auth steps.
+        return {"react-router": ["useNavigate"]}
+
+    def add_hooks(self) -> list[str | rx.Var]:
+        return ["const __clerk_router_navigate = useNavigate();"]
 
     def add_custom_code(self) -> list[str]:
         return []
@@ -888,7 +978,6 @@ async def update_user_metadata(
     return updated_user
 
 
-
 async def issue_passcode(
     current_state: rx.State,
     user_identifier: str,
@@ -936,9 +1025,7 @@ async def issue_passcode(
         )
 
     # Generate N-digit numeric passcode (preserves leading zeros)
-    code = "".join(
-        str(secrets.randbelow(10)) for _ in range(config.passcode_length)
-    )
+    code = "".join(str(secrets.randbelow(10)) for _ in range(config.passcode_length))
     code_hash = hashlib.sha256(code.encode()).hexdigest()
 
     now = datetime.now(timezone.utc)
