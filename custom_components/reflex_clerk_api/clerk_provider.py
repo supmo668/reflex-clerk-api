@@ -592,10 +592,12 @@ class ClerkSessionSynchronizer(rx.Component):
     def add_custom_code(self) -> list[str]:
         clerk_state_name = ClerkState.get_full_name()
 
+        # The effect also depends on userId, so it runs again when the signed-in
+        # user changes while isSignedIn stays true.
         return [
             """
 function ClerkSessionSynchronizer({ children }) {
-  const { getToken, isLoaded, isSignedIn } = useAuth()
+  const { getToken, isLoaded, isSignedIn, userId } = useAuth()
   const [ addEvents, connectErrors ] = useContext(EventLoopContext)
 
   useEffect(() => {
@@ -608,7 +610,7 @@ function ClerkSessionSynchronizer({ children }) {
           addEvents([ReflexEvent("%s.clear_clerk_session")])
         }
       }
-  }, [isSignedIn])
+  }, [isSignedIn, userId])
 
   return (
       <>{children}</>
