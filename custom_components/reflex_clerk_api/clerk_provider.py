@@ -375,6 +375,8 @@ class ClerkUser(rx.State):
     Note: For this to be updated on login/logout events, it must be registered on the ClerkState.
     """
 
+    user_id: str = ""
+    """The Clerk user id this record was loaded for; empty when no record is loaded."""
     first_name: str = ""
     last_name: str = ""
     username: str = ""
@@ -397,14 +399,28 @@ class ClerkUser(rx.State):
 
     @rx.event
     async def load_user(self) -> None:
+        clerk_state = await _get_state_within_handler(self, ClerkState)
+        user_id = clerk_state.user_id
         try:
-            user: clerk_backend_api.models.User = await get_user(self)
+            if not user_id:
+                raise MissingUserError("No user_id to get user for")
+            user: clerk_backend_api.models.User = await _fetch_user(
+                clerk_state, user_id
+            )
         except MissingUserError:
             logging.debug("Clearing user state")
             self.reset()
             return
 
+        clerk_state = await _get_state_within_handler(self, ClerkState)
+        if clerk_state.user_id != user_id:
+            # The signed-in user changed while loading.
+            logging.debug("Clearing user state")
+            self.reset()
+            return
+
         logging.debug("Updating user state")
+        self.user_id = user_id
         self.first_name = (
             user.first_name
             if user.first_name and user.first_name != clerk_backend_api.UNSET
@@ -483,7 +499,9 @@ class ClerkUser(rx.State):
             private_metadata=private_metadata,
             unsafe_metadata=unsafe_metadata,
         )
-        if updated_user:
+        clerk_state = await _get_state_within_handler(self, ClerkState)
+        # Only a record loaded for the signed-in user is updated.
+        if updated_user and self.user_id and self.user_id == clerk_state.user_id:
             self.public_metadata = (
                 dict(updated_user.public_metadata)
                 if updated_user.public_metadata
@@ -529,6 +547,11 @@ class ClerkUser(rx.State):
             new_phone = await update_user_phone_number(
                 self, phone_number, old_phone_id=old_phone_id, verified=verified
             )
+
+            clerk_state = await _get_state_within_handler(self, ClerkState)
+            if not self.user_id or self.user_id != clerk_state.user_id:
+                # Only a record loaded for the signed-in user is updated.
+                return
 
             # Update local state
             if new_phone:
@@ -825,6 +848,13 @@ async def get_user(current_state: rx.State) -> clerk_backend_api.models.User:
     user_id = clerk_state.user_id
     if user_id is None:
         raise MissingUserError("No user_id to get user for")
+    return await _fetch_user(clerk_state, user_id)
+
+
+async def _fetch_user(
+    clerk_state: ClerkState, user_id: str
+) -> clerk_backend_api.models.User:
+    """Fetch the user with the given id from the Clerk backend API."""
     user = await clerk_state.client.users.get_async(user_id=user_id)
     if user is None:
         raise MissingUserError("No user found")
