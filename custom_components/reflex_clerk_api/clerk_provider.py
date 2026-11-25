@@ -43,6 +43,12 @@ class MissingUserError(ReflexClerkApiError):
     pass
 
 
+SESSION_CLEARED_SIGNED_OUT = "signed_out"
+"""``ClerkState.session_cleared_reason``: the browser reported no signed-in user."""
+SESSION_CLEARED_INVALID_TOKEN = "invalid_token"
+"""``ClerkState.session_cleared_reason``: the session token could not be validated."""
+
+
 class ClerkState(rx.State):
     is_signed_in: bool = False
     """Whether the user is logged in."""
@@ -56,6 +62,8 @@ class ClerkState(rx.State):
     user_id: str | None = None
     """The clerk user ID of the user, if they are logged in."""
 
+    _session_cleared_reason: str = ""
+    """Backing value of ``session_cleared_reason``; written only by this class."""
     _auth_error: str = ""
     """Last JWT decode/signature failure (``"<ErrorClass>: <message>"``), for debugging."""
     _expired_refresh_attempts: int = 0
@@ -152,6 +160,27 @@ class ClerkState(rx.State):
         assert self._client is not None
         return self._client
 
+    @rx.var
+    def session_cleared_reason(self) -> str:
+        """Why the session was last cleared: the browser reported no signed-in user, or the session token could not be validated.
+
+        One of ``""`` (not cleared since the last valid session), ``"signed_out"``
+        or ``"invalid_token"``. Read-only.
+        """
+        return self._session_cleared_reason
+
+    def _clear_session(self, reason: str) -> None:
+        """Reset the session fields and record why."""
+        self.reset()
+        self.auth_checked = True
+        self._session_cleared_reason = reason
+
+    async def _clear_invalid_session(self) -> EventType:
+        """Clear the session because its token could not be validated."""
+        async with self:
+            ClerkState._clear_session(self, SESSION_CLEARED_INVALID_TOKEN)
+        return list(self._dependent_handlers.values())
+
     @rx.event(background=True)
     async def set_clerk_session(self, token: str) -> EventType:
         """Manually obtain user session information via the Clerk JWT.
@@ -165,7 +194,7 @@ class ClerkState(rx.State):
             # Null/empty: the fresh-token request found no Clerk-JS session (or
             # the frontend sent nothing). Nothing to validate — signed out.
             logging.info("Empty Clerk token; clearing session")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         jwks = await self._get_jwk_keys()
         try:
             decoded: JWTClaims = jwt.decode(
@@ -188,7 +217,7 @@ class ClerkState(rx.State):
                 self._auth_error = f"{type(e).__name__}: {e}"
             self._request_jwk_reset()
             logging.warning(f"JWT decode error: {type(e).__name__}: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         try:
             # Validate the token according to the claim options (e.g. iss, exp, nbf, azp.)
             #
@@ -231,15 +260,15 @@ class ClerkState(rx.State):
                     self._fresh_token_js, callback=ClerkState.set_clerk_session
                 )
             logging.warning(f"JWT still expired after refresh; clearing session: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         except jose_errors.InvalidTokenError as e:
             # nbf-not-yet / iat-in-future. Even with the 60s leeway above,
             # larger clock skews still raise; a fresh token would not help.
             logging.warning(f"JWT temporal claim invalid (clock skew): {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         except (jose_errors.InvalidClaimError, jose_errors.MissingClaimError) as e:
             logging.warning(f"JWT token is invalid: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         except jose_errors.JoseError as e:
             # Catch-all for every other authlib JOSE error. Any JoseError that
             # escapes this handler leaves ``auth_checked`` False and hangs every
@@ -247,7 +276,7 @@ class ClerkState(rx.State):
             async with self:
                 self._auth_error = f"{type(e).__name__}: {e}"
             logging.warning(f"JWT validation error: {type(e).__name__}: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
 
         async with self:
             self.is_signed_in = True
@@ -255,6 +284,7 @@ class ClerkState(rx.State):
             self.user_id = str(decoded.get("sub"))
             self.auth_checked = True
             self._expired_refresh_attempts = 0
+            self._session_cleared_reason = ""
         return list(self._dependent_handlers.values())
 
     @rx.event
@@ -264,8 +294,7 @@ class ClerkState(rx.State):
         This event is triggered by the frontend via the ClerkSessionSynchronizer/ClerkProvider component.
         """
         logging.debug("Clearing Clerk session")
-        self.reset()
-        self.auth_checked = True
+        ClerkState._clear_session(self, SESSION_CLEARED_SIGNED_OUT)
         return list(self._dependent_handlers.values())
 
     @rx.event(background=True)

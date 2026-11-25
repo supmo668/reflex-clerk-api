@@ -63,6 +63,14 @@ class _FakeClerkState:
         # Class-level config (ClassVars) resolves on the real class, as on rx.State.
         return getattr(ClerkState, name)
 
+    def reset(self) -> None:
+        """As ``rx.State.reset``: the session fields go back to their defaults."""
+        object.__setattr__(self, "is_signed_in", False)
+        object.__setattr__(self, "auth_checked", False)
+        object.__setattr__(self, "user_id", None)
+        object.__setattr__(self, "claims", None)
+        object.__setattr__(self, "_session_cleared_reason", "")
+
     async def __aenter__(self):
         return self
 
@@ -93,6 +101,15 @@ def _token(rsa_key, claims: dict[str, Any], kid: str = KID) -> str:
 
 def _run(fake, token):
     return asyncio.run(ClerkState.set_clerk_session.fn(fake, token))
+
+
+def _assert_cleared_as_invalid(fake, result) -> None:
+    """The session is cleared in place, with the reason, and the handlers are returned."""
+    assert result == list(ClerkState._dependent_handlers.values())
+    assert fake.is_signed_in is False
+    assert fake.user_id is None and fake.claims is None
+    assert fake.auth_checked is True
+    assert fake._session_cleared_reason == "invalid_token"
 
 
 def _claims(**overrides: Any) -> dict[str, Any]:
@@ -138,7 +155,7 @@ def test_second_expired_token_in_window_clears_session(rsa_key):
     fake = _fake(rsa_key)
     token = _token(rsa_key, _expired_claims())
     assert _is_token_refresh(_run(fake, token))
-    assert _run(fake, token) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, token))
 
 
 def test_refresh_budget_renews_after_window(rsa_key, monkeypatch):
@@ -163,7 +180,7 @@ def test_valid_token_after_refresh_signs_in_and_resets_budget(rsa_key):
 @pytest.mark.parametrize("token", [None, "", "   "])
 def test_null_or_empty_token_clears_without_raising(rsa_key, token):
     fake = _fake(rsa_key)
-    assert _run(fake, token) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, token))
     assert fake.jwk_resets == 0
 
 
@@ -173,7 +190,7 @@ def test_null_or_empty_token_clears_without_raising(rsa_key, token):
 def test_bad_signature_clears_and_resets_jwks(rsa_key):
     other = JsonWebKey.generate_key("RSA", 2048, is_private=True, options={"kid": KID})
     fake = _fake(rsa_key, jwk=other.as_dict(is_private=False))
-    assert _run(fake, _token(rsa_key, _claims())) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, _token(rsa_key, _claims())))
     assert fake.jwk_resets == 1
     assert "BadSignatureError" in fake._auth_error
 
@@ -184,14 +201,14 @@ def test_unknown_kid_clears_and_resets_jwks(rsa_key):
         "RSA", 2048, is_private=True, options={"kid": "rotated-kid"}
     )
     fake = _fake(rsa_key, jwk=rotated.as_dict(is_private=False))
-    assert _run(fake, _token(rsa_key, _claims())) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, _token(rsa_key, _claims())))
     assert fake.jwk_resets == 1
     assert "ValueError" in fake._auth_error
 
 
 def test_malformed_token_clears_and_resets_jwks(rsa_key):
     fake = _fake(rsa_key)
-    assert _run(fake, "not-a-jwt") is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, "not-a-jwt"))
     assert fake.jwk_resets == 1
     assert "DecodeError" in fake._auth_error
 
@@ -203,22 +220,21 @@ def test_not_yet_valid_token_clears_session(rsa_key):
     now = int(time.time())
     fake = _fake(rsa_key)
     token = _token(rsa_key, _claims(nbf=now + LEEWAY + 240))
-    assert _run(fake, token) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, token))
 
 
 def test_iat_in_future_clears_session(rsa_key):
     now = int(time.time())
     fake = _fake(rsa_key)
     token = _token(rsa_key, _claims(iat=now + LEEWAY + 240))
-    assert _run(fake, token) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, token))
 
 
 def test_missing_essential_claim_clears_session(rsa_key):
     claims = _claims()
     del claims["nbf"]
-    assert (
-        _run(_fake(rsa_key), _token(rsa_key, claims)) is ClerkState.clear_clerk_session
-    )
+    fake = _fake(rsa_key)
+    _assert_cleared_as_invalid(fake, _run(fake, _token(rsa_key, claims)))
 
 
 def test_wrong_issuer_clears_session(rsa_key):
@@ -227,7 +243,7 @@ def test_wrong_issuer_clears_session(rsa_key):
         "iss": {"essential": True, "value": "https://other.example.com"},
     }
     fake = _fake(rsa_key, claims_options=options)
-    assert _run(fake, _token(rsa_key, _claims())) is ClerkState.clear_clerk_session
+    _assert_cleared_as_invalid(fake, _run(fake, _token(rsa_key, _claims())))
 
 
 def test_clear_marks_auth_checked():
@@ -244,3 +260,67 @@ def test_clear_marks_auth_checked():
     s = _S()
     ClerkState.clear_clerk_session.fn(s)
     assert s.auth_checked is True
+    assert s._session_cleared_reason == "signed_out"
+
+
+# --- why the session was cleared ---------------------------------------------
+
+
+@pytest.mark.parametrize("token", ["", "   ", None])
+def test_empty_token_clears_session_as_invalid(rsa_key, token):
+    fake = _fake(rsa_key)
+    _assert_cleared_as_invalid(fake, _run(fake, token))
+
+
+def test_valid_token_resets_the_cleared_reason(rsa_key):
+    fake = _fake(rsa_key)
+    _assert_cleared_as_invalid(fake, _run(fake, "not-a-jwt"))
+    _run(fake, _token(rsa_key, _claims()))
+    assert fake.is_signed_in is True
+    assert fake._session_cleared_reason == ""
+
+
+def test_invalid_token_clears_a_signed_in_session_with_the_reason(rsa_key):
+    fake = _fake(rsa_key)
+    _run(fake, _token(rsa_key, _claims()))
+    assert fake.is_signed_in is True and fake.user_id == "user_123"
+    _assert_cleared_as_invalid(fake, _run(fake, "not-a-jwt"))
+
+
+def test_first_expired_token_does_not_set_a_cleared_reason(rsa_key):
+    fake = _fake(rsa_key)
+    assert _is_token_refresh(_run(fake, _token(rsa_key, _expired_claims())))
+    assert fake._session_cleared_reason == ""
+
+
+def test_cleared_reason_on_a_real_state_tree():
+    import reflex.state as rs
+
+    root = rs.State(_reflex_internal_init=True)  # type: ignore[call-arg]
+    state: Any = root.get_substate(tuple(ClerkState.get_full_name().split(".")))
+    assert state.session_cleared_reason == ""
+    ClerkState.clear_clerk_session.fn(state)
+    assert state.session_cleared_reason == "signed_out"
+    assert state.auth_checked is True and state.is_signed_in is False
+    asyncio.run(ClerkState.set_clerk_session.fn(state, ""))
+    assert state.session_cleared_reason == "invalid_token"
+    assert state.auth_checked is True and state.is_signed_in is False
+
+
+def test_cleared_reason_is_read_only():
+    assert "session_cleared_reason" in ClerkState.computed_vars
+    assert "session_cleared_reason" not in ClerkState.base_vars
+    assert "_session_cleared_reason" in ClerkState.backend_vars
+    handlers = ClerkState.event_handlers
+    assert "set_session_cleared_reason" not in handlers
+    assert "set__session_cleared_reason" not in handlers
+    assert not hasattr(ClerkState, "set_session_cleared_reason")
+    assert "_clear_session" not in handlers
+    assert "_clear_invalid_session" not in handlers
+
+
+def test_clear_clerk_session_takes_no_argument():
+    import inspect
+
+    params = list(inspect.signature(ClerkState.clear_clerk_session.fn).parameters)
+    assert params == ["self"]
