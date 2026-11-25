@@ -43,6 +43,12 @@ class MissingUserError(ReflexClerkApiError):
     pass
 
 
+SESSION_CLEARED_SIGNED_OUT = "signed_out"
+"""``ClerkState.session_cleared_reason``: the browser reported no signed-in user."""
+SESSION_CLEARED_INVALID_TOKEN = "invalid_token"
+"""``ClerkState.session_cleared_reason``: the session token could not be validated."""
+
+
 class ClerkState(rx.State):
     is_signed_in: bool = False
     """Whether the user is logged in."""
@@ -56,6 +62,8 @@ class ClerkState(rx.State):
     user_id: str | None = None
     """The clerk user ID of the user, if they are logged in."""
 
+    _session_cleared_reason: str = ""
+    """Backing value of ``session_cleared_reason``; written only by this class."""
     _auth_error: str = ""
     """Last JWT decode/signature failure (``"<ErrorClass>: <message>"``), for debugging."""
     _expired_refresh_attempts: int = 0
@@ -152,6 +160,27 @@ class ClerkState(rx.State):
         assert self._client is not None
         return self._client
 
+    @rx.var
+    def session_cleared_reason(self) -> str:
+        """Why the session was last cleared: the browser reported no signed-in user, or the session token could not be validated.
+
+        One of ``""`` (not cleared since the last valid session), ``"signed_out"``
+        or ``"invalid_token"``. Read-only.
+        """
+        return self._session_cleared_reason
+
+    def _clear_session(self, reason: str) -> None:
+        """Reset the session fields and record why."""
+        self.reset()
+        self.auth_checked = True
+        self._session_cleared_reason = reason
+
+    async def _clear_invalid_session(self) -> EventType:
+        """Clear the session because its token could not be validated."""
+        async with self:
+            ClerkState._clear_session(self, SESSION_CLEARED_INVALID_TOKEN)
+        return list(self._dependent_handlers.values())
+
     @rx.event(background=True)
     async def set_clerk_session(self, token: str) -> EventType:
         """Manually obtain user session information via the Clerk JWT.
@@ -165,7 +194,7 @@ class ClerkState(rx.State):
             # Null/empty: the fresh-token request found no Clerk-JS session (or
             # the frontend sent nothing). Nothing to validate — signed out.
             logging.info("Empty Clerk token; clearing session")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         jwks = await self._get_jwk_keys()
         try:
             decoded: JWTClaims = jwt.decode(
@@ -188,7 +217,7 @@ class ClerkState(rx.State):
                 self._auth_error = f"{type(e).__name__}: {e}"
             self._request_jwk_reset()
             logging.warning(f"JWT decode error: {type(e).__name__}: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         try:
             # Validate the token according to the claim options (e.g. iss, exp, nbf, azp.)
             #
@@ -231,15 +260,15 @@ class ClerkState(rx.State):
                     self._fresh_token_js, callback=ClerkState.set_clerk_session
                 )
             logging.warning(f"JWT still expired after refresh; clearing session: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         except jose_errors.InvalidTokenError as e:
             # nbf-not-yet / iat-in-future. Even with the 60s leeway above,
             # larger clock skews still raise; a fresh token would not help.
             logging.warning(f"JWT temporal claim invalid (clock skew): {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         except (jose_errors.InvalidClaimError, jose_errors.MissingClaimError) as e:
             logging.warning(f"JWT token is invalid: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
         except jose_errors.JoseError as e:
             # Catch-all for every other authlib JOSE error. Any JoseError that
             # escapes this handler leaves ``auth_checked`` False and hangs every
@@ -247,7 +276,7 @@ class ClerkState(rx.State):
             async with self:
                 self._auth_error = f"{type(e).__name__}: {e}"
             logging.warning(f"JWT validation error: {type(e).__name__}: {e}")
-            return ClerkState.clear_clerk_session
+            return await ClerkState._clear_invalid_session(self)
 
         async with self:
             self.is_signed_in = True
@@ -255,6 +284,7 @@ class ClerkState(rx.State):
             self.user_id = str(decoded.get("sub"))
             self.auth_checked = True
             self._expired_refresh_attempts = 0
+            self._session_cleared_reason = ""
         return list(self._dependent_handlers.values())
 
     @rx.event
@@ -264,8 +294,7 @@ class ClerkState(rx.State):
         This event is triggered by the frontend via the ClerkSessionSynchronizer/ClerkProvider component.
         """
         logging.debug("Clearing Clerk session")
-        self.reset()
-        self.auth_checked = True
+        ClerkState._clear_session(self, SESSION_CLEARED_SIGNED_OUT)
         return list(self._dependent_handlers.values())
 
     @rx.event(background=True)
@@ -375,6 +404,8 @@ class ClerkUser(rx.State):
     Note: For this to be updated on login/logout events, it must be registered on the ClerkState.
     """
 
+    user_id: str = ""
+    """The Clerk user id this record was loaded for; empty when no record is loaded."""
     first_name: str = ""
     last_name: str = ""
     username: str = ""
@@ -397,14 +428,28 @@ class ClerkUser(rx.State):
 
     @rx.event
     async def load_user(self) -> None:
+        clerk_state = await _get_state_within_handler(self, ClerkState)
+        user_id = clerk_state.user_id
         try:
-            user: clerk_backend_api.models.User = await get_user(self)
+            if not user_id:
+                raise MissingUserError("No user_id to get user for")
+            user: clerk_backend_api.models.User = await _fetch_user(
+                clerk_state, user_id
+            )
         except MissingUserError:
             logging.debug("Clearing user state")
             self.reset()
             return
 
+        clerk_state = await _get_state_within_handler(self, ClerkState)
+        if clerk_state.user_id != user_id:
+            # The signed-in user changed while loading.
+            logging.debug("Clearing user state")
+            self.reset()
+            return
+
         logging.debug("Updating user state")
+        self.user_id = user_id
         self.first_name = (
             user.first_name
             if user.first_name and user.first_name != clerk_backend_api.UNSET
@@ -483,7 +528,9 @@ class ClerkUser(rx.State):
             private_metadata=private_metadata,
             unsafe_metadata=unsafe_metadata,
         )
-        if updated_user:
+        clerk_state = await _get_state_within_handler(self, ClerkState)
+        # Only a record loaded for the signed-in user is updated.
+        if updated_user and self.user_id and self.user_id == clerk_state.user_id:
             self.public_metadata = (
                 dict(updated_user.public_metadata)
                 if updated_user.public_metadata
@@ -530,6 +577,11 @@ class ClerkUser(rx.State):
                 self, phone_number, old_phone_id=old_phone_id, verified=verified
             )
 
+            clerk_state = await _get_state_within_handler(self, ClerkState)
+            if not self.user_id or self.user_id != clerk_state.user_id:
+                # Only a record loaded for the signed-in user is updated.
+                return
+
             # Update local state
             if new_phone:
                 self.phone_number = new_phone.phone_number or phone_number
@@ -569,10 +621,12 @@ class ClerkSessionSynchronizer(rx.Component):
     def add_custom_code(self) -> list[str]:
         clerk_state_name = ClerkState.get_full_name()
 
+        # The effect also depends on userId, so it runs again when the signed-in
+        # user changes while isSignedIn stays true.
         return [
             """
 function ClerkSessionSynchronizer({ children }) {
-  const { getToken, isLoaded, isSignedIn } = useAuth()
+  const { getToken, isLoaded, isSignedIn, userId } = useAuth()
   const [ addEvents, connectErrors ] = useContext(EventLoopContext)
 
   useEffect(() => {
@@ -585,7 +639,7 @@ function ClerkSessionSynchronizer({ children }) {
           addEvents([ReflexEvent("%s.clear_clerk_session")])
         }
       }
-  }, [isSignedIn])
+  }, [isSignedIn, userId])
 
   return (
       <>{children}</>
@@ -825,6 +879,13 @@ async def get_user(current_state: rx.State) -> clerk_backend_api.models.User:
     user_id = clerk_state.user_id
     if user_id is None:
         raise MissingUserError("No user_id to get user for")
+    return await _fetch_user(clerk_state, user_id)
+
+
+async def _fetch_user(
+    clerk_state: ClerkState, user_id: str
+) -> clerk_backend_api.models.User:
+    """Fetch the user with the given id from the Clerk backend API."""
     user = await clerk_state.client.users.get_async(user_id=user_id)
     if user is None:
         raise MissingUserError("No user found")
